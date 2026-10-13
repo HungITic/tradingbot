@@ -111,6 +111,7 @@ class ParsedSignal(Base):
     entry_max: Mapped[Decimal | None] = mapped_column(Numeric(15, 5))
     stop_loss: Mapped[Decimal | None] = mapped_column(Numeric(15, 5))
     take_profit: Mapped[Decimal | None] = mapped_column(Numeric(15, 5))
+    take_profit_2: Mapped[Decimal | None] = mapped_column(Numeric(15, 5), nullable=True)
     raw_tp_text: Mapped[str | None] = mapped_column(
         String(100)
     )  # "Trên 200pips" — keep original

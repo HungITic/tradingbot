@@ -40,6 +40,7 @@ class ParsedNewOrder(BaseModel):
     entry_max: Decimal | None = None
     stop_loss: Decimal | None = None
     take_profit: Decimal | None = None
+    take_profit_2: Decimal | None = None
     raw_tp_text: str | None = None  # e.g., "Trên 200pips"
     lot_size: Decimal | None = None
 

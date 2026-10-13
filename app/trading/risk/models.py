@@ -46,7 +46,7 @@ class RiskConfig(BaseModel):
     max_daily_loss_percent: Decimal = Decimal("10.0")
     require_sl: bool = True
     require_tp: bool = False
-    allowed_symbols: list[str] = Field(default_factory=lambda: ["XAUUSD", "XAUUSDm"])
+    allowed_symbols: list[str] = Field(default_factory=lambda: ["XAUUSD", "XAUUSDm", "XAUUSD.s", "XAUUSDc", "XAUUSD.c"])
     signal_expire_seconds: int = 300
     duplicate_timeout_seconds: int = 10
 

@@ -79,8 +79,15 @@ class SymbolAllowedRule(AbstractRiskRule):
         allowed = [s.upper() for s in context.config.allowed_symbols]
         sym_upper = sym.upper()
         if sym_upper not in allowed:
-            sym_base = sym_upper.rstrip("M").rstrip("C").rstrip(".M").rstrip("+")
-            allowed_bases = [a.rstrip("M").rstrip("C").rstrip(".M").rstrip("+") for a in allowed]
+            known_suffixes = (".S", ".RAW", ".M", ".C", "M", "C", "+", "PRO", "_I")
+            def _strip_suffix(s: str) -> str:
+                for suf in known_suffixes:
+                    if s.endswith(suf):
+                        return s[:-len(suf)]
+                return s
+
+            sym_base = _strip_suffix(sym_upper)
+            allowed_bases = [_strip_suffix(a) for a in allowed]
             if sym_base not in allowed_bases and not any(sym_upper.startswith(a) for a in allowed):
                 return RiskResult(
                     rule_name=self.name,
@@ -166,8 +173,7 @@ class DuplicateSignalRule(AbstractRiskRule):
         for item in context.recent_signals:
             if item.get("symbol") == sym and item.get("action") == act:
                 elapsed = now - item.get("timestamp", 0)
-                # if elapsed < context.config.duplicate_timeout_seconds:
-                if 0 > 1:
+                if elapsed < context.config.duplicate_timeout_seconds:
                     return RiskResult(
                         rule_name=self.name,
                         status=RiskStatus.REJECTED,

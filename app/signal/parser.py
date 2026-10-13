@@ -24,9 +24,9 @@ from app.signal.rules import ManagementRuleEngine
 PARSER_VERSION = "v1.0"
 
 # Regex for New Order Header
-# Example: "Sell #XAU 4148 - 4160", "Buy XAUUSD 4150.5", "BUY #EUR 1.0850 - 1.0870"
+# Example: "Sell #XAU 4148 - 4160", "Buy XAUUSD 4150.5", "Buy VÀNG 4047 - 4050"
 ORDER_HEADER_REGEX = re.compile(
-    r"(?i)\b(BUY|SELL|LONG|SHORT|MUA|BÁN)\s+(#[A-Za-z0-9_]+|[A-Za-z]{3,10})(?:\s+(?:at|@))?\s+([\d.,]+(?:\s*[-–—]\s*[\d.,]+)?)"
+    r"(?i)\b(BUY|SELL|LONG|SHORT|MUA|BÁN)\s+(#[A-Za-z0-9_]+|VÀNG|VANG|[A-Za-z]{3,10})(?:\s+(?:at|@))?\s+([\d.,]+(?:\s*[-–—]\s*[\d.,]+)?)"
 )
 
 # Regex for Stop Loss
@@ -36,7 +36,7 @@ SL_REGEX = re.compile(r"(?i)\b(?:SL|STOP\s*LOSS|DỪNG\s*LỖ)\s*[:=\s]\s*([\d.,
 TP_REGEX = re.compile(r"(?i)\b(?:TP\s*\d*|TAKE\s*PROFIT|CHỐT\s*LỜI)\s*[:=\s]\s*([^\n\r]+)")
 
 # Regex to detect symbol from any text (e.g. in management messages like "#XAU chốt bớt")
-GENERIC_SYMBOL_REGEX = re.compile(r"(?i)(#[A-Za-z0-9_]+|\b(?:XAUUSD|EURUSD|GBPUSD|BTCUSD|GOLD)\b)")
+GENERIC_SYMBOL_REGEX = re.compile(r"(?i)(#[A-Za-z0-9_]+|\b(?:XAUUSD|EURUSD|GBPUSD|BTCUSD|GOLD|VÀNG|VANG)\b)")
 
 
 class SignalParser:
@@ -74,16 +74,18 @@ class SignalParser:
 
             action = normalize_action(raw_action)
             symbol = self.normalizer.normalize(raw_sym)
-            entry_min, entry_max = parse_price_range(raw_range)
 
-            # Parse SL
+            # Parse SL first so distance to SL can determine min_entry and max_entry accurately
             sl_val = None
             sl_match = SL_REGEX.search(clean_text)
             if sl_match:
                 sl_val = parse_price(sl_match.group(1))
 
+            entry_min, entry_max = parse_price_range(raw_range, action=action, sl=sl_val)
+
             # Parse TP
             tp_val = None
+            tp_val_2 = None
             raw_tp_text = None
             tp_match = TP_REGEX.search(clean_text)
             if tp_match:
@@ -93,7 +95,13 @@ class SignalParser:
                     raw_tp_text = tp_str
                     tp_val = None
                 else:
-                    tp_val = parse_price(tp_str)
+                    normalized_tp = re.sub(r"[\u2013\u2014]", "-", tp_str)
+                    tp_parts = [p.strip() for p in normalized_tp.split("-") if p.strip()]
+                    if len(tp_parts) >= 2:
+                        tp_val = parse_price(tp_parts[0])
+                        tp_val_2 = parse_price(tp_parts[1])
+                    elif len(tp_parts) == 1:
+                        tp_val = parse_price(tp_parts[0])
 
             new_order = ParsedNewOrder(
                 action=action or OrderAction.BUY,
@@ -103,6 +111,7 @@ class SignalParser:
                 entry_max=entry_max,
                 stop_loss=sl_val,
                 take_profit=tp_val,
+                take_profit_2=tp_val_2,
                 raw_tp_text=raw_tp_text,
             )
 

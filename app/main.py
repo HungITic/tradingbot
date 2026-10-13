@@ -55,9 +55,15 @@ class Application:
             await init_db()
             logger.info("database_ready")
 
-            # 1.1 Load Management Rules from DB into Rule Engine
+            # 1.1 Verify and seed initial configuration & rules into DB
+            from app.config.seeder import seed_initial_data
+            seed_res = await seed_initial_data()
+            logger.info("database_initial_data_verified", **seed_res)
+
+            # 1.2 Load Risk Config and Management Rules from DB
+            await trading_service.load_risk_config_from_db()
             rule_count = await trading_service.load_management_rules_from_db()
-            logger.info("management_rules_loaded", count=rule_count)
+            logger.info("db_config_and_rules_loaded", rule_count=rule_count)
 
             # 2. MT5 Broker Connection
             logger.info("connecting_mt5_broker")

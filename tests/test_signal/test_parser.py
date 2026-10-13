@@ -46,6 +46,36 @@ TP: Trên 200pips"""
         assert signal.new_order.take_profit is None
         assert signal.new_order.raw_tp_text == "Trên 200pips"
 
+    def test_parse_buy_range_min_max_entry_distance_to_sl(self, parser):
+        # In BUY: SL is below entries (2730).
+        # 2750 is further from SL -> min_entry (xa SL hơn)
+        # 2740 is closer to SL -> max_entry (gần SL hơn)
+        text1 = """BUY #XAU 2750 - 2740
+SL: 2730
+TP: 2780"""
+        sig1 = parser.parse(text1)
+        assert sig1.new_order.entry_min == Decimal("2750")
+        assert sig1.new_order.entry_max == Decimal("2740")
+
+        # Even if signal writes lower number first: 2740 - 2750
+        text2 = """BUY #XAU 2740 - 2750
+SL: 2730
+TP: 2780"""
+        sig2 = parser.parse(text2)
+        assert sig2.new_order.entry_min == Decimal("2750")
+        assert sig2.new_order.entry_max == Decimal("2740")
+
+    def test_parse_sell_range_inverted_order(self, parser):
+        # In SELL: SL is above entries (4170).
+        # 4148 is further from SL -> min_entry (xa SL hơn)
+        # 4160 is closer to SL -> max_entry (gần SL hơn)
+        text = """SELL #XAU 4160 - 4148
+SL: 4170
+TP: 4100"""
+        sig = parser.parse(text)
+        assert sig.new_order.entry_min == Decimal("4148")
+        assert sig.new_order.entry_max == Decimal("4160")
+
     def test_parse_buy_single_price_with_numeric_tp(self, parser):
         text = """BUY XAUUSD 4150.5
 SL 4140.0
@@ -119,6 +149,39 @@ class TestManagementRules:
         assert signal.message_type == MessageType.POSITION_MANAGEMENT
         assert signal.management_actions[0].action_type == ManagementType.PARTIAL_CLOSE
         assert signal.management_actions[0].percentage == Decimal("40")
+
+    def test_parse_channel_real_signals(self, parser):
+        # 1. Test VÀNG symbol + TP range
+        vang_text = "Buy VÀNG 4047 - 4050\n\nSL: 4040\n\nTP: 4057 - 4064"
+        sig = parser.parse(vang_text)
+        assert sig.message_type == MessageType.NEW_ORDER
+        assert sig.symbol == "XAUUSDm"
+        assert sig.new_order.entry_min == Decimal("4050")  # Xa SL 4040 hơn
+        assert sig.new_order.entry_max == Decimal("4047")  # Gần SL 4040 hơn
+        assert sig.new_order.stop_loss == Decimal("4040")
+        assert sig.new_order.take_profit == Decimal("4057")
+        assert sig.new_order.take_profit_2 == Decimal("4064")
+
+        # 2. Test SELL with TP range
+        sell_text = "Sell #XAU 4354 - 4359\n\nSL: 4366\n\nTP: 4342 - 4333"
+        sig_sell = parser.parse(sell_text)
+        assert sig_sell.message_type == MessageType.NEW_ORDER
+        assert sig_sell.new_order.take_profit == Decimal("4342")
+        assert sig_sell.new_order.take_profit_2 == Decimal("4333")
+
+        # 3. Test new management phrases
+        m1 = parser.parse("Vàng chạy lẹ 50 pips chốt lãi 1 phần, dịch stop loss nhé ae")
+        assert m1.message_type == MessageType.POSITION_MANAGEMENT
+        assert any(a.action_type == ManagementType.PARTIAL_CLOSE for a in m1.management_actions)
+        assert any(a.action_type == ManagementType.MOVE_SL for a in m1.management_actions)
+
+        m2 = parser.parse("Vàng vẫn bay :)) 230 pips chốt all được rồi nhé")
+        assert m2.message_type == MessageType.POSITION_MANAGEMENT
+        assert any(a.action_type == ManagementType.CLOSE for a in m2.management_actions)
+
+        m3 = parser.parse("Đóng Buy Vàng")
+        assert m3.message_type == MessageType.POSITION_MANAGEMENT
+        assert any(a.action_type == ManagementType.CLOSE for a in m3.management_actions)
 
 
 class TestSignalValidator:

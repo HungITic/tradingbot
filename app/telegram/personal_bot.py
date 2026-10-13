@@ -17,6 +17,8 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 from app.config.settings import settings
@@ -33,7 +35,7 @@ logger = structlog.get_logger(__name__)
 
 
 def admin_only(func):
-    """Decorator ensuring only the authorized admin chat can trigger commands."""
+    """Decorator ensuring only the authorized admin chat or user can trigger commands."""
 
     @functools.wraps(func)
     async def wrapper(*args: Any, **kwargs: Any):
@@ -45,11 +47,21 @@ def admin_only(func):
         if not update:
             update = kwargs.get("update")
 
+        user_id = update.effective_user.id if (update and update.effective_user) else 0
         chat_id = update.effective_chat.id if (update and update.effective_chat) else 0
-        if chat_id != settings.telegram.admin_chat_id:
-            logger.warning("unauthorized_access_attempt", chat_id=chat_id)
-            if update and update.effective_message:
-                await update.effective_message.reply_text("⛔ Unauthorized access.")
+        admin_id = settings.telegram.admin_chat_id
+
+        if admin_id and chat_id != admin_id and user_id != admin_id:
+            logger.warning("unauthorized_access_attempt", chat_id=chat_id, user_id=user_id, admin_id=admin_id)
+            target = update.effective_message if update else None
+            if target:
+                await target.reply_text(
+                    f"⛔ <b>Từ chối truy cập (Unauthorized)</b>\n"
+                    f"• User ID của bạn: <code>{user_id}</code>\n"
+                    f"• Chat ID hiện tại: <code>{chat_id}</code>\n"
+                    f"• Admin ID trong hệ thống: <code>{admin_id}</code>",
+                    parse_mode=ParseMode.HTML,
+                )
             return
         return await func(*args, **kwargs)
 
@@ -112,6 +124,14 @@ class PersonalTelegramBot:
         self.app.add_handler(CommandHandler("keywords", self.cmd_rules))
         self.app.add_handler(CommandHandler("rule", self.cmd_rule))
 
+        # Signal Replay / Message Link Commands
+        self.app.add_handler(CommandHandler("replay", self.cmd_replay))
+        self.app.add_handler(CommandHandler("signal", self.cmd_replay))
+        self.app.add_handler(CommandHandler("reload_signal", self.cmd_replay))
+
+        # Handle Raw Telegram Links Sent Directly to Bot Chat
+        self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text_message))
+
         # Emergency Commands
         self.app.add_handler(CommandHandler("kill", self.cmd_kill))
         self.app.add_handler(CommandHandler("disable", self.cmd_kill))
@@ -132,7 +152,7 @@ class PersonalTelegramBot:
             self._running = True
             await self.app.start()
             if self.app.updater:
-                await self.app.updater.start_polling(drop_pending_updates=True)
+                await self.app.updater.start_polling(drop_pending_updates=False)
             logger.info("personal_telegram_bot_started")
 
     async def stop(self) -> None:
@@ -179,6 +199,7 @@ class PersonalTelegramBot:
             "• /history — Lịch sử lệnh đã đóng (P&amp;L từng lệnh)\n"
             "• /stats — Báo cáo hiệu suất & tỷ lệ Win/Loss\n"
             "• /balance — Số dư, Equity, Margin\n"
+            "• /replay &lt;link&gt; — Nạp lại tín hiệu từ link tin nhắn Telegram\n"
             "• /config — Cấu hình rủi ro & bot\n"
             "• /rules — Quản lý từ khóa tiếng Việt (Keywords)\n"
             "• /help — Toàn bộ danh mục lệnh"
@@ -202,6 +223,10 @@ class PersonalTelegramBot:
             "/setsl &lt;ticket&gt; &lt;price&gt; — Update Stop Loss\n"
             "/settp &lt;ticket&gt; &lt;price&gt; — Update Take Profit\n"
             "/breakeven &lt;ticket&gt; — Move SL to entry price\n\n"
+            "<b>🔄 Nạp lại tín hiệu (Signal Replay):</b>\n"
+            "/replay &lt;link&gt; — Nạp lại tín hiệu bằng link Telegram\n"
+            "  <i>VD:</i> <code>/replay https://t.me/MegaLodonGOLDForex/1241</code>\n"
+            "  <i>(Hoặc dán trực tiếp link tin nhắn Telegram vào chat)</i>\n\n"
             "<b>📝 Quản lý từ khóa tiếng Việt (Rules):</b>\n"
             "/rules — Xem toàn bộ từ khóa quản lý lệnh\n"
             "/rule add &lt;từ khóa&gt; &lt;action&gt; [params] — Thêm từ khóa\n"
@@ -461,12 +486,12 @@ class PersonalTelegramBot:
 
     @admin_only
     async def cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        self.service.risk_config.enabled = False
+        await self.service.update_config_key("enabled", False, updated_by="PAUSE")
         await update.message.reply_text("⏸️ <b>Bot PAUSED.</b> Signal execution is suspended.", parse_mode=ParseMode.HTML)
 
     @admin_only
     async def cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        self.service.risk_config.enabled = True
+        await self.service.update_config_key("enabled", True, updated_by="RESUME")
         await update.message.reply_text("▶️ <b>Bot RESUMED.</b> Normal signal processing active.", parse_mode=ParseMode.HTML)
 
     @admin_only
@@ -484,96 +509,151 @@ class PersonalTelegramBot:
 
     @admin_only
     async def cmd_kill(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        self.service.risk_config.enabled = False
+        await self.service.update_config_key("enabled", False, updated_by="KILL_SWITCH")
         results = await self.service.close_all_positions()
         await update.message.reply_text(
             f"🚨 <b>EMERGENCY KILL SWITCH ACTIVATED</b>\n"
-            f"• Bot disabled.\n"
+            f"• Bot disabled (saved to DB).\n"
             f"• Closed {len(results)} active positions.",
             parse_mode=ParseMode.HTML,
         )
 
     @admin_only
     async def cmd_config(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        args = context.args or []
-        cfg = self.service.risk_config
-
-        if args and args[0].lower() == "set" and len(args) >= 3:
-            key = args[1]
-            val = " ".join(args[2:])
-            if cfg.update_field(key, val):
-                await update.message.reply_text(f"✅ Updated <code>{key}</code> = <b>{getattr(cfg, key)}</b>", parse_mode=ParseMode.HTML)
-            else:
-                await update.message.reply_text(f"❌ Unknown config key: <code>{key}</code>", parse_mode=ParseMode.HTML)
+        target = update.effective_message or update.message
+        if not target:
             return
 
-        msg = (
-            "⚙️ <b>Live Risk & Management Configuration</b>\n\n"
-            f"• <b>Enabled:</b> {cfg.enabled}\n"
-            f"• <b>Dual Entry Setup:</b> {'ON' if cfg.enable_dual_entry else 'OFF'}\n"
-            f"• <b>Lot Min Entry:</b> {cfg.lot_min_entry}\n"
-            f"• <b>Lot Max Entry:</b> {cfg.lot_max_entry}\n"
-            f"• <b>Dung sai trượt giá:</b> {cfg.max_slippage_entry} giá\n"
-            f"• <b>Max Open Positions:</b> {cfg.max_open_positions}\n"
-            f"• <b>Default Lot:</b> {cfg.default_lot}\n"
-            f"• <b>Max Lot:</b> {cfg.max_lot}\n"
-            f"• <b>Min Lot:</b> {cfg.min_lot}\n"
-            f"• <b>Max Daily Loss:</b> {cfg.max_daily_loss_percent}%\n"
-            f"• <b>Require Stop Loss:</b> {cfg.require_sl}\n"
-            f"• <b>Allowed Symbols:</b> {', '.join(cfg.allowed_symbols)}\n"
-            f"• <b>Default Partial Close:</b> {cfg.default_partial_close_percent}%\n"
-            f"• <b>Auto Breakeven on Partial:</b> {cfg.auto_breakeven_on_partial}\n"
-            f"• <b>Signal Timeout:</b> {cfg.signal_expire_seconds}s\n\n"
-            "<i>Sử dụng nút bấm bên dưới hoặc câu lệnh:</i>\n"
-            "<code>/config set lot_min_entry 0.02</code>\n"
-            "<code>/config set lot_max_entry 0.01</code>\n"
-            "<code>/config set max_slippage_entry 1.5</code>\n"
-            "<code>/config set enable_dual_entry true</code>"
-        )
-        keyboard = build_risk_config_keyboard(cfg)
-        await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        try:
+            args = list(context.args or [])
+            cfg = self.service.risk_config
+            user_id = update.effective_user.id if update.effective_user else 0
+            logger.info("cmd_config_received", args=args, user_id=user_id)
+
+            if args and args[0].lower() == "reload":
+                await self.service.load_risk_config_from_db()
+                await target.reply_text("🔄 Đã tải lại toàn bộ cấu hình từ database!", parse_mode=ParseMode.HTML)
+                return
+
+            # Support formats:
+            # 1. /config set key val
+            # 2. /config set key=val
+            # 3. /config key val
+            # 4. /config key=val
+            key: str | None = None
+            val: str | None = None
+
+            remaining = args[1:] if (args and args[0].lower() == "set") else args
+
+            if len(remaining) == 1 and "=" in remaining[0]:
+                parts = remaining[0].split("=", 1)
+                key, val = parts[0].strip(), parts[1].strip()
+            elif len(remaining) >= 2:
+                key = remaining[0].strip()
+                val = " ".join(remaining[1:]).strip()
+
+            if key and val:
+                key_clean = key.lower()
+                if await self.service.update_config_key(key_clean, val, updated_by="ADMIN"):
+                    current_val = getattr(cfg, key_clean, val)
+                    await target.reply_text(
+                        f"✅ <b>Đã cập nhật cấu hình vào DB:</b>\n"
+                        f"• <code>{key_clean}</code> = <b>{current_val}</b>",
+                        parse_mode=ParseMode.HTML,
+                    )
+                else:
+                    await target.reply_text(
+                        f"❌ <b>Không tìm thấy thuộc tính cấu hình:</b> <code>{key_clean}</code>\n"
+                        f"<i>Gõ <code>/config</code> để xem danh sách các tham số hợp lệ.</i>",
+                        parse_mode=ParseMode.HTML,
+                    )
+                return
+
+            syms_str = ", ".join(cfg.allowed_symbols)
+            msg = (
+                "⚙️ <b>Live Risk & Management Configuration</b>\n"
+                "<i>Cấu hình động lưu trữ trực tiếp vào PostgreSQL.</i>\n\n"
+                "<b>1. 🎯 Vào lệnh & Dual Entry (Min / Max Entry):</b>\n"
+                f"• Dual Entry: <b>{'ON' if cfg.enable_dual_entry else 'OFF'}</b> ➔ <code>/config set enable_dual_entry {str(not cfg.enable_dual_entry).lower()}</code>\n"
+                f"• Lot Min Entry (Market): <b>{cfg.lot_min_entry}</b> ➔ <code>/config set lot_min_entry {cfg.lot_min_entry}</code>\n"
+                f"• Lot Max Entry (Limit): <b>{cfg.lot_max_entry}</b> ➔ <code>/config set lot_max_entry {cfg.lot_max_entry}</code>\n"
+                f"• Dung sai trượt giá: <b>{cfg.max_slippage_entry} giá</b> ➔ <code>/config set max_slippage_entry {cfg.max_slippage_entry}</code>\n\n"
+                "<b>2. 🛡️ Quản lý rủi ro & Tài khoản (Risk & Limits):</b>\n"
+                f"• Bot Active: <b>{'ON' if cfg.enabled else 'OFF'}</b> ➔ <code>/config set enabled {str(not cfg.enabled).lower()}</code>\n"
+                f"• Lệnh mở tối đa: <b>{cfg.max_open_positions}</b> ➔ <code>/config set max_open_positions {cfg.max_open_positions}</code>\n"
+                f"• Lot mặc định: <b>{cfg.default_lot}</b> ➔ <code>/config set default_lot {cfg.default_lot}</code>\n"
+                f"• Lot tối thiểu: <b>{cfg.min_lot}</b> ➔ <code>/config set min_lot {cfg.min_lot}</code>\n"
+                f"• Lot tối đa: <b>{cfg.max_lot}</b> ➔ <code>/config set max_lot {cfg.max_lot}</code>\n"
+                f"• Lỗ tối đa ngày: <b>{cfg.max_daily_loss_percent}%</b> ➔ <code>/config set max_daily_loss_percent {cfg.max_daily_loss_percent}</code>\n"
+                f"• Bắt buộc Stop Loss: <b>{cfg.require_sl}</b> ➔ <code>/config set require_sl {str(not cfg.require_sl).lower()}</code>\n"
+                f"• Bắt buộc Take Profit: <b>{cfg.require_tp}</b> ➔ <code>/config set require_tp {str(not cfg.require_tp).lower()}</code>\n\n"
+                "<b>3. ✂️ Quản lý vị thế & Chốt lời (Position Management):</b>\n"
+                f"• Chốt lời 1 phần: <b>{cfg.default_partial_close_percent}%</b> ➔ <code>/config set default_partial_close_percent {cfg.default_partial_close_percent}</code>\n"
+                f"• Tự dời SL về Entry: <b>{cfg.auto_breakeven_on_partial}</b> ➔ <code>/config set auto_breakeven_on_partial {str(not cfg.auto_breakeven_on_partial).lower()}</code>\n"
+                f"• Bù giá dời SL (Offset): <b>{cfg.breakeven_offset_price}</b> ➔ <code>/config set breakeven_offset_price 0.0</code>\n\n"
+                "<b>4. ⏳ Cặp tiền & Hạn tín hiệu (Symbols & Timing):</b>\n"
+                f"• Cặp cho phép: <b>{syms_str}</b>\n"
+                f"  ➔ <code>/config set allowed_symbols {syms_str}</code>\n"
+                f"• Hạn tín hiệu (Expire): <b>{cfg.signal_expire_seconds}s</b> ➔ <code>/config set signal_expire_seconds 300</code>\n"
+                f"• Lọc trùng (Dedup): <b>{cfg.duplicate_timeout_seconds}s</b> ➔ <code>/config set duplicate_timeout_seconds 10</code>\n\n"
+                "🔄 <i>Nạp lại từ DB:</i> <code>/config reload</code>\n"
+                "💡 <i>Chạm vào bất kỳ câu lệnh nào ở trên để copy nhanh và gửi!</i>"
+            )
+            keyboard = build_risk_config_keyboard(cfg)
+            await target.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        except Exception as e:
+            logger.error("cmd_config_failed", error=str(e), exc_info=True)
+            await target.reply_text(f"❌ Lỗi xử lý cấu hình: <code>{e}</code>", parse_mode=ParseMode.HTML)
 
     @admin_only
     async def cmd_rules(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Display or reload Vietnamese keyword management rules."""
-        args = context.args or []
-        if args and args[0].lower() == "reload":
-            count = await self.service.load_management_rules_from_db()
-            await update.message.reply_text(
-                f"🔄 Đã tải lại <b>{count}</b> quy tắc từ PostgreSQL vào hệ thống!",
-                parse_mode=ParseMode.HTML,
-            )
+        target = update.effective_message or update.message
+        if not target:
             return
 
-        rules = self.service.get_management_rules()
-        lines = [
-            "📖 <b>Từ khóa quản lý lệnh (Vietnamese Rules):</b>\n",
-            "<i>Bot nhận diện các từ khóa này trong tin nhắn Telegram để thực thi quản lý vị thế:</i>\n",
-        ]
+        try:
+            args = context.args or []
+            if args and args[0].lower() == "reload":
+                count = await self.service.load_management_rules_from_db()
+                await target.reply_text(
+                    f"🔄 Đã tải lại <b>{count}</b> quy tắc từ PostgreSQL vào hệ thống!",
+                    parse_mode=ParseMode.HTML,
+                )
+                return
 
-        for r in rules:
-            param_str = ""
-            if "percentage" in r.default_params:
-                param_str = f"({r.default_params['percentage']}%)"
-            elif "target" in r.default_params:
-                param_str = f"({r.default_params['target']})"
+            rules = self.service.get_management_rules()
+            lines = [
+                "📖 <b>Từ khóa quản lý lệnh (Vietnamese Rules):</b>\n",
+                "<i>Bot nhận diện các từ khóa này trong tin nhắn Telegram để thực thi quản lý vị thế:</i>\n",
+            ]
 
-            action_name = r.action_type.value if hasattr(r.action_type, "value") else str(r.action_type)
-            lines.append(f"• <code>{r.keyword}</code> ➔ <b>{action_name}</b> {param_str}")
+            for r in rules:
+                param_str = ""
+                if "percentage" in r.default_params:
+                    param_str = f"({r.default_params['percentage']}%)"
+                elif "target" in r.default_params:
+                    param_str = f"({r.default_params['target']})"
 
-        lines.extend([
-            "\n💡 <b>Lệnh tinh chỉnh trực tiếp:</b>",
-            "• Thêm/sửa: <code>/rule add &lt;từ khóa&gt; &lt;ACTION&gt; [params]</code>",
-            "  <i>VD:</i> <code>/rule add \"cắt bớt\" PARTIAL_CLOSE 50</code>",
-            "  <i>VD:</i> <code>/rule add \"về hòa\" BREAKEVEN</code>",
-            "  <i>VD:</i> <code>/rule add \"chốt sạch\" CLOSE</code>",
-            "• Xóa từ khóa: <code>/rule del &lt;từ khóa&gt;</code>",
-            "  <i>VD:</i> <code>/rule del \"chốt sạch\"</code>",
-            "• Nạp lại từ DB: <code>/rules reload</code>",
-            "\n<i>Hỗ trợ các ACTION: PARTIAL_CLOSE, CLOSE, MOVE_SL, BREAKEVEN, REENTRY</i>",
-        ])
+                action_name = r.action_type.value if hasattr(r.action_type, "value") else str(r.action_type)
+                lines.append(f"• <code>{r.keyword}</code> ➔ <b>{action_name}</b> {param_str}")
 
-        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+            lines.extend([
+                "\n💡 <b>Lệnh tinh chỉnh trực tiếp:</b>",
+                "• Thêm/sửa: <code>/rule add &lt;từ khóa&gt; &lt;ACTION&gt; [params]</code>",
+                "  <i>VD:</i> <code>/rule add \"cắt bớt\" PARTIAL_CLOSE 50</code>",
+                "  <i>VD:</i> <code>/rule add \"về hòa\" BREAKEVEN</code>",
+                "  <i>VD:</i> <code>/rule add \"chốt sạch\" CLOSE</code>",
+                "• Xóa từ khóa: <code>/rule del &lt;từ khóa&gt;</code>",
+                "  <i>VD:</i> <code>/rule del \"chốt sạch\"</code>",
+                "• Nạp lại từ DB: <code>/rules reload</code>",
+                "\n<i>Hỗ trợ các ACTION: PARTIAL_CLOSE, CLOSE, MOVE_SL, BREAKEVEN, REENTRY</i>",
+            ])
+
+            await target.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+        except Exception as e:
+            logger.error("cmd_rules_failed", error=str(e), exc_info=True)
+            await target.reply_text(f"❌ Lỗi: <code>{e}</code>", parse_mode=ParseMode.HTML)
 
     @admin_only
     async def cmd_rule(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -661,6 +741,88 @@ class PersonalTelegramBot:
         else:
             await update.message.reply_text("❌ Lệnh phụ không hợp lệ. Dùng <code>add</code> hoặc <code>del</code>.", parse_mode=ParseMode.HTML)
 
+    @admin_only
+    async def handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle incoming text messages from admin. If a Telegram message link is found, replay it."""
+        msg = update.effective_message
+        if not msg or not msg.text:
+            return
+
+        from app.telegram.utils import extract_telegram_link
+        link = extract_telegram_link(msg.text)
+        if link:
+            await self._execute_replay_link(update, context, link)
+
+    @admin_only
+    async def cmd_replay(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Replay / re-process a trading signal by Telegram message link."""
+        msg = update.effective_message
+        if not msg:
+            return
+
+        text = msg.text or ""
+        from app.telegram.utils import extract_telegram_link
+        link = extract_telegram_link(text)
+
+        if not link and context.args:
+            link = extract_telegram_link(context.args[0])
+
+        if not link:
+            await msg.reply_text(
+                "ℹ️ <b>Hướng dẫn nạp lại tín hiệu (Signal Replay):</b>\n\n"
+                "Gửi link tin nhắn chứa tín hiệu từ kênh Telegram:\n"
+                "• Cú pháp: <code>/replay &lt;link_tin_nhắn&gt;</code>\n"
+                "  <i>VD:</i> <code>/replay https://t.me/MegaLodonGOLDForex/1241</code>\n\n"
+                "• Hoặc dán trực tiếp link vào bot chat này mà không cần gõ lệnh.\n"
+                "<i>Hỗ trợ cả kênh công khai (@slug) và kênh riêng tư (/c/channel_id).</i>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        await self._execute_replay_link(update, context, link)
+
+    async def _execute_replay_link(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, link: str
+    ) -> None:
+        """Fetch message from Telegram channel via Telethon userbot and run trading pipeline."""
+        msg = update.effective_message
+        if not msg:
+            return
+
+        status_msg = await msg.reply_text(
+            f"⏳ <b>Đang tải tin nhắn từ Telegram...</b>\n• Link: <code>{link}</code>",
+            parse_mode=ParseMode.HTML,
+        )
+
+        try:
+            from app.telegram.signal_listener import signal_listener
+            raw_text, msg_id, chat_id, canonical_link, is_reentry = (
+                await signal_listener.fetch_message_by_link(link)
+            )
+
+            preview_text = raw_text[:400] + ("..." if len(raw_text) > 400 else "")
+            await status_msg.edit_text(
+                f"📥 <b>Đã tải tin nhắn thành công! Đang xử lý tín hiệu...</b>\n"
+                f"• <b>Kênh / Chat ID:</b> <code>{chat_id}</code>\n"
+                f"• <b>Message ID:</b> <code>#{msg_id}</code>\n"
+                f"• <b>Nội dung tin nhắn:</b>\n<pre>{preview_text}</pre>",
+                parse_mode=ParseMode.HTML,
+            )
+
+            # Route through TradingService full pipeline
+            await self.service.process_raw_message(
+                raw_text,
+                is_reentry=is_reentry,
+                message_id=msg_id,
+                chat_id=chat_id,
+                message_link=canonical_link,
+            )
+        except Exception as e:
+            logger.error("replay_signal_failed", link=link, error=str(e), exc_info=True)
+            await status_msg.edit_text(
+                f"❌ <b>Không thể nạp lại tín hiệu từ Telegram:</b>\n<code>{e}</code>",
+                parse_mode=ParseMode.HTML,
+            )
 
     async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Global error handler for Telegram application."""
@@ -693,21 +855,27 @@ class PersonalTelegramBot:
 
         if data == "bot_pause":
             cfg.enabled = False
+            await self.service.save_risk_config_to_db(updated_by="BUTTON")
             await query.edit_message_reply_markup(reply_markup=build_status_keyboard(False))
         elif data == "bot_resume":
             cfg.enabled = True
+            await self.service.save_risk_config_to_db(updated_by="BUTTON")
             await query.edit_message_reply_markup(reply_markup=build_status_keyboard(True))
         elif data == "toggle_bot_enabled":
             cfg.enabled = not cfg.enabled
+            await self.service.save_risk_config_to_db(updated_by="BUTTON")
             await query.edit_message_reply_markup(reply_markup=build_risk_config_keyboard(cfg))
         elif data == "toggle_require_sl":
             cfg.require_sl = not cfg.require_sl
+            await self.service.save_risk_config_to_db(updated_by="BUTTON")
             await query.edit_message_reply_markup(reply_markup=build_risk_config_keyboard(cfg))
         elif data == "toggle_auto_be":
             cfg.auto_breakeven_on_partial = not cfg.auto_breakeven_on_partial
+            await self.service.save_risk_config_to_db(updated_by="BUTTON")
             await query.edit_message_reply_markup(reply_markup=build_risk_config_keyboard(cfg))
         elif data == "toggle_dual_entry":
             cfg.enable_dual_entry = not cfg.enable_dual_entry
+            await self.service.save_risk_config_to_db(updated_by="BUTTON")
             await query.edit_message_reply_markup(reply_markup=build_risk_config_keyboard(cfg))
         elif data == "cycle_max_slippage":
             slips = [Decimal("0.5"), Decimal("1.0"), Decimal("1.5"), Decimal("2.0"), Decimal("3.0")]
@@ -716,6 +884,7 @@ class PersonalTelegramBot:
                 cfg.max_slippage_entry = slips[(curr_idx + 1) % len(slips)]
             except ValueError:
                 cfg.max_slippage_entry = Decimal("1.0")
+            await self.service.save_risk_config_to_db(updated_by="BUTTON")
             await query.edit_message_reply_markup(reply_markup=build_risk_config_keyboard(cfg))
         elif data == "cycle_lot_min_entry":
             lots = [Decimal("0.01"), Decimal("0.02"), Decimal("0.03"), Decimal("0.05"), Decimal("0.10")]
@@ -724,6 +893,7 @@ class PersonalTelegramBot:
                 cfg.lot_min_entry = lots[(curr_idx + 1) % len(lots)]
             except ValueError:
                 cfg.lot_min_entry = Decimal("0.01")
+            await self.service.save_risk_config_to_db(updated_by="BUTTON")
             await query.edit_message_reply_markup(reply_markup=build_risk_config_keyboard(cfg))
         elif data == "cycle_lot_max_entry":
             lots = [Decimal("0.01"), Decimal("0.02"), Decimal("0.03"), Decimal("0.05"), Decimal("0.10")]
@@ -732,6 +902,7 @@ class PersonalTelegramBot:
                 cfg.lot_max_entry = lots[(curr_idx + 1) % len(lots)]
             except ValueError:
                 cfg.lot_max_entry = Decimal("0.01")
+            await self.service.save_risk_config_to_db(updated_by="BUTTON")
             await query.edit_message_reply_markup(reply_markup=build_risk_config_keyboard(cfg))
         elif data == "edit_max_pos":
             positions_list = [1, 2, 3, 5, 10]
@@ -740,6 +911,7 @@ class PersonalTelegramBot:
                 cfg.max_open_positions = positions_list[(curr_idx + 1) % len(positions_list)]
             except ValueError:
                 cfg.max_open_positions = 5
+            await self.service.save_risk_config_to_db(updated_by="BUTTON")
             await query.edit_message_reply_markup(reply_markup=build_risk_config_keyboard(cfg))
         elif data == "toggle_partial_pct":
             pcts = [Decimal("30.0"), Decimal("50.0"), Decimal("70.0")]
@@ -748,6 +920,7 @@ class PersonalTelegramBot:
                 cfg.default_partial_close_percent = pcts[(curr_idx + 1) % len(pcts)]
             except ValueError:
                 cfg.default_partial_close_percent = Decimal("50.0")
+            await self.service.save_risk_config_to_db(updated_by="BUTTON")
             await query.edit_message_reply_markup(reply_markup=build_risk_config_keyboard(cfg))
         elif data.startswith("close_"):
             ticket_str = data.split("_")[1]
@@ -827,17 +1000,22 @@ class PersonalTelegramBot:
             action = parts[1]  # min, max, ignore
             try:
                 sig_id = int(parts[2])
+                base_html = (
+                    query.message.text_html
+                    .replace("Tin nhắn gốc:", "Signal:")
+                    .replace("Tin nhắn gốc", "Signal")
+                )
                 if action == "ignore":
                     # Just remove the keyboard and add a note
                     await query.edit_message_text(
-                        f"{query.message.text_html}\n\n❌ <i>Đã bỏ qua lệnh chờ limit.</i>", 
+                        f"{base_html}\n\n❌ <i>Đã bỏ qua lệnh chờ limit.</i>", 
                         parse_mode=ParseMode.HTML
                     )
                 else:
                     res_msg = await self.service.execute_override_order(sig_id, action)
                     # Append result to the message and remove keyboard
                     await query.edit_message_text(
-                        f"{query.message.text_html}\n\n{res_msg}",
+                        f"{base_html}\n\n{res_msg}",
                         parse_mode=ParseMode.HTML
                     )
             except (IndexError, ValueError):

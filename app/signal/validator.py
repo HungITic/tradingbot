@@ -39,23 +39,30 @@ class SignalValidator:
         if self.require_tp and order.take_profit is None and not order.raw_tp_text:
             return False, "Take profit is required but missing"
 
-        entry_ref = order.entry_max if order.action == OrderAction.BUY else order.entry_min
-        if entry_ref is None:
-            entry_ref = order.entry_min or order.entry_max
+        entries = [e for e in (order.entry_min, order.entry_max) if e is not None]
+        if not entries:
+            entries = []
 
         # Logical SL direction
-        if order.stop_loss is not None and entry_ref is not None:
-            if order.action == OrderAction.BUY and order.stop_loss >= entry_ref:
-                return False, f"BUY Stop loss ({order.stop_loss}) must be below entry ({entry_ref})"
-            if order.action == OrderAction.SELL and order.stop_loss <= entry_ref:
-                return False, f"SELL Stop loss ({order.stop_loss}) must be above entry ({entry_ref})"
+        if order.stop_loss is not None and entries:
+            if order.action == OrderAction.BUY:
+                closest_to_sl = min(entries)
+                if order.stop_loss >= closest_to_sl:
+                    return False, f"BUY Stop loss ({order.stop_loss}) must be below entry ({closest_to_sl})"
+            elif order.action == OrderAction.SELL:
+                closest_to_sl = max(entries)
+                if order.stop_loss <= closest_to_sl:
+                    return False, f"SELL Stop loss ({order.stop_loss}) must be above entry ({closest_to_sl})"
 
         # Logical TP direction
-        if order.take_profit is not None and entry_ref is not None:
-            if order.action == OrderAction.BUY and order.take_profit <= entry_ref:
-                return False, f"BUY Take profit ({order.take_profit}) must be above entry ({entry_ref})"
-            if order.action == OrderAction.SELL and order.take_profit >= entry_ref:
-                return False, f"SELL Take profit ({order.take_profit}) must be below entry ({entry_ref})"
+        if order.take_profit is not None and entries:
+            if order.action == OrderAction.BUY:
+                furthest_entry = max(entries)
+                if order.take_profit <= min(entries):
+                    return False, f"BUY Take profit ({order.take_profit}) must be above entry ({min(entries)})"
+            elif order.action == OrderAction.SELL:
+                if order.take_profit >= max(entries):
+                    return False, f"SELL Take profit ({order.take_profit}) must be below entry ({max(entries)})"
 
         return True, "Valid"
 

@@ -64,6 +64,8 @@ class OrderRequest:
     price: Decimal | None = None
     sl: Decimal | None = None
     tp: Decimal | None = None
+    tp1: Decimal | None = None
+    tp2: Decimal | None = None
     deviation: int = 20
     magic: int = 234000
     comment: str = ""
@@ -118,7 +120,7 @@ class DealInfo:
     swap: Decimal
     commission: Decimal
     time: datetime
-    reason: int
+    reason: int = 0
     magic: int = 0
     comment: str = ""
 

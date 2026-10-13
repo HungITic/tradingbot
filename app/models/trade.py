@@ -49,6 +49,8 @@ class Order(Base):
     price: Mapped[Decimal | None] = mapped_column(Numeric(15, 5))
     sl: Mapped[Decimal | None] = mapped_column(Numeric(15, 5))
     tp: Mapped[Decimal | None] = mapped_column(Numeric(15, 5))
+    tp1: Mapped[Decimal | None] = mapped_column(Numeric(15, 5), nullable=True)
+    tp2: Mapped[Decimal | None] = mapped_column(Numeric(15, 5), nullable=True)
     deviation: Mapped[int | None] = mapped_column(Integer)
     magic: Mapped[int | None] = mapped_column(Integer)
     comment: Mapped[str | None] = mapped_column(String(200))

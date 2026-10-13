@@ -75,6 +75,14 @@ class TradingService:
         self._recent_signals: list[dict[str, Any]] = []
         self._notify_callback: Callable[..., Coroutine[Any, Any, None]] | None = None
         self._pending_overrides: dict[int, dict[str, Any]] = {}
+        self._tp1_processed_tickets: set[int] = set()
+        self._signal_message_links: dict[int, str] = {}
+        self._order_message_links: dict[int, str] = {}
+
+    def format_notification(self, text: str, message_link: str | None = None) -> str:
+        """Attach clickable source message link to notification if available."""
+        from app.telegram.utils import format_notification_with_link
+        return format_notification_with_link(text, message_link)
 
     def set_notification_callback(
         self, callback: Callable[..., Coroutine[Any, Any, None]]
@@ -90,7 +98,10 @@ class TradingService:
                 kwargs = {}
                 if reply_markup is not None:
                     kwargs["reply_markup"] = reply_markup
-                res = self._notify_callback(message, **kwargs)
+                try:
+                    res = self._notify_callback(message, **kwargs)
+                except TypeError:
+                    res = self._notify_callback(message)
                 if inspect.isawaitable(res):
                     await res
             except Exception as e:
@@ -124,12 +135,14 @@ class TradingService:
                     if deal.entry == "IN" and deal.order > 0:
                         updated = await self._update_db_order_status(deal.order, "FILLED")
                         if updated and not _is_first_sync:
-                            await self.notify(
+                            order_link = self._order_message_links.get(deal.order)
+                            filled_msg = (
                                 f"🔔 <b>Lệnh chờ đã khớp (Pending Order Filled)</b>\n"
                                 f"Cặp: <b>{deal.symbol}</b> | {deal.deal_type}\n"
                                 f"Khối lượng: {deal.volume} lot @ {deal.price}\n"
                                 f"Ticket Deal: <code>{deal.ticket}</code> (Order: {deal.order})"
                             )
+                            await self.notify(self.format_notification(filled_msg, order_link))
                         
                     elif deal.entry in ("OUT", "OUT_BY", "INOUT"):
                         # Position closed (SL, TP or manual)
@@ -143,18 +156,149 @@ class TradingService:
                                 reason_str = "Đóng lệnh"
                                 
                             icon = "🔴" if deal.profit < 0 else "🟢"
-                            await self.notify(
+                            deal_link = self._order_message_links.get(deal.order) or self._order_message_links.get(deal.ticket)
+                            closed_msg = (
                                 f"{icon} <b>Vị thế đã đóng ({reason_str})</b>\n"
                                 f"Cặp: <b>{deal.symbol}</b> | {deal.deal_type}\n"
                                 f"Khối lượng: {deal.volume} lot @ {deal.price}\n"
                                 f"Lợi nhuận: <b>{deal.profit}$</b>"
                             )
+                            await self.notify(self.format_notification(closed_msg, deal_link))
                 
                 _is_first_sync = False
+
+                # Evaluate TP1 and TP2 milestones for open positions
+                await self._check_tp_milestones()
             except Exception as e:
                 logger.error("sync_loop_error", error=str(e))
                 
-            await asyncio.sleep(10)
+            await asyncio.sleep(3)
+
+    async def _check_tp_milestones(self) -> None:
+        """
+        Evaluate live open positions against TP1 and TP2 milestones:
+        - TP1 reached: check if partially closed before. If already closed, skip.
+                       If not, close 50% and move SL to Entry.
+        - TP2 reached: full close 100%.
+        """
+        try:
+            positions = await self.broker.get_positions()
+            if not positions:
+                return
+
+            tickets = [p.ticket for p in positions]
+            from app.config.database import get_session
+            from app.models.trade import Order as DBOrder
+            from sqlalchemy import select
+
+            async with get_session() as session:
+                stmt = select(DBOrder).where(DBOrder.mt5_ticket.in_(tickets))
+                db_orders = {o.mt5_ticket: o for o in (await session.scalars(stmt)).all()}
+
+            for pos in positions:
+                db_order = db_orders.get(pos.ticket)
+                if not db_order:
+                    continue
+
+                tp1 = db_order.tp1
+                tp2 = db_order.tp2
+                if tp1 is None and tp2 is None:
+                    continue
+
+                current_price = pos.current_price
+                is_buy = pos.position_type == "BUY"
+
+                pos_link = self._order_message_links.get(pos.ticket) or (self._signal_message_links.get(db_order.signal_id) if db_order.signal_id else None)
+
+                # 1. Check TP2 first (Full Close)
+                tp2_reached = False
+                if tp2 is not None:
+                    if is_buy and current_price >= tp2:
+                        tp2_reached = True
+                    elif not is_buy and current_price <= tp2:
+                        tp2_reached = True
+
+                if tp2_reached:
+                    res = await self.broker.close_position(pos.ticket, pos.volume)
+                    status_icon = "🎯" if res.success else "❌"
+                    tp2_msg = (
+                        f"{status_icon} <b>Đạt TP2 ({tp2}): Chốt lời Full</b>\n"
+                        f"Ticket: <code>{pos.ticket}</code> | Cặp: <b>{pos.symbol}</b> ({pos.position_type})\n"
+                        f"Khối lượng: {pos.volume} lot @ {current_price}\n"
+                        f"Kết quả: {res.comment}"
+                    )
+                    await self.notify(self.format_notification(tp2_msg, pos_link))
+                    await self._insert_management_action(
+                        signal_db_id=db_order.signal_id,
+                        mt5_ticket=pos.ticket,
+                        action_type="CLOSE",
+                        parameters={"reason": "TP2_REACHED", "price": float(current_price), "tp2": float(tp2)},
+                        status="EXECUTED" if res.success else "FAILED",
+                        result={"comment": res.comment, "retcode": res.retcode},
+                    )
+                    self._tp1_processed_tickets.discard(pos.ticket)
+                    continue
+
+                # 2. Check TP1 (Partial Close 50% & Move SL to Entry)
+                tp1_reached = False
+                if tp1 is not None:
+                    if is_buy and current_price >= tp1:
+                        tp1_reached = True
+                    elif not is_buy and current_price <= tp1:
+                        tp1_reached = True
+
+                if tp1_reached:
+                    already_closed = (
+                        (db_order.volume is not None and pos.volume < db_order.volume)
+                        or (pos.ticket in self._tp1_processed_tickets)
+                    )
+                    if already_closed:
+                        continue
+
+                    vol_to_close = (pos.volume / Decimal("2")).quantize(Decimal("0.01"))
+                    vol_to_close = max(Decimal("0.01"), min(vol_to_close, pos.volume))
+
+                    if pos.volume <= Decimal("0.01"):
+                        be_res = await self.broker.modify_position(pos.ticket, sl=pos.open_price)
+                        self._tp1_processed_tickets.add(pos.ticket)
+                        be_icon = "🎯" if be_res.success else "⚠️"
+                        tp1_be_msg = (
+                            f"{be_icon} <b>Đạt TP1 ({tp1}): Dời SL về Entry</b>\n"
+                            f"Ticket: <code>{pos.ticket}</code> | Cặp: <b>{pos.symbol}</b>\n"
+                            f"<i>Volume {pos.volume} lot tối thiểu không thể chia nhỏ, dời SL về {pos.open_price} để gồng tiếp TP2!</i>"
+                        )
+                        await self.notify(self.format_notification(tp1_be_msg, pos_link))
+                        await self._insert_management_action(
+                            signal_db_id=db_order.signal_id,
+                            mt5_ticket=pos.ticket,
+                            action_type="MOVE_SL",
+                            parameters={"reason": "TP1_REACHED_MIN_LOT", "sl": float(pos.open_price), "tp1": float(tp1)},
+                            status="EXECUTED" if be_res.success else "FAILED",
+                            result={"comment": be_res.comment, "retcode": be_res.retcode},
+                        )
+                    else:
+                        close_res = await self.broker.close_position(pos.ticket, vol_to_close)
+                        be_res = await self.broker.modify_position(pos.ticket, sl=pos.open_price)
+                        self._tp1_processed_tickets.add(pos.ticket)
+                        icon = "🎯" if close_res.success else "❌"
+                        rem_vol = pos.volume - vol_to_close
+                        tp1_part_msg = (
+                            f"{icon} <b>Đạt TP1 ({tp1}): Chốt 50% & Dời SL về Entry</b>\n"
+                            f"Ticket: <code>{pos.ticket}</code> | Cặp: <b>{pos.symbol}</b>\n"
+                            f"Đã chốt: <b>{vol_to_close} lot</b> | Còn lại: <b>{rem_vol} lot</b>\n"
+                            f"SL mới: <code>{pos.open_price}</code> (Entry hòa vốn)"
+                        )
+                        await self.notify(self.format_notification(tp1_part_msg, pos_link))
+                        await self._insert_management_action(
+                            signal_db_id=db_order.signal_id,
+                            mt5_ticket=pos.ticket,
+                            action_type="PARTIAL_CLOSE",
+                            parameters={"reason": "TP1_REACHED", "volume": float(vol_to_close), "sl": float(pos.open_price), "tp1": float(tp1)},
+                            status="EXECUTED" if close_res.success else "FAILED",
+                            result={"comment": close_res.comment, "retcode": close_res.retcode},
+                        )
+        except Exception as e:
+            logger.error("check_tp_milestones_failed", error=str(e))
 
     async def _insert_trade_record(self, deal: DealInfo) -> bool:
         try:
@@ -230,9 +374,16 @@ class TradingService:
             return False
     async def execute_override_order(self, signal_db_id: int, target: str) -> str:
         """Executes a pending order override (min or max) and returns the result message."""
-        reqs = self._pending_overrides.get(signal_db_id)
-        if not reqs:
+        entry = self._pending_overrides.get(signal_db_id)
+        if not entry:
             return "❌ Lệnh chờ không còn hiệu lực hoặc đã quá hạn."
+        
+        if isinstance(entry, dict) and "orders" in entry:
+            reqs = entry["orders"]
+            msg_link = entry.get("message_link")
+        else:
+            reqs = entry
+            msg_link = None
         
         targets_to_execute = list(reqs.keys()) if target == "both" else [target]
         results = []
@@ -245,7 +396,9 @@ class TradingService:
                 
             result = await self.broker.open_order(req)
             if result.success:
-                await self._record_db_order(signal_db_id, result, req, status="PLACED")
+                if msg_link and result.ticket:
+                    self._order_message_links[result.ticket] = msg_link
+                await self._record_db_order(signal_db_id, result, req, status="PLACED", message_link=msg_link)
                 results.append(
                     f"✅ <b>Order Placed ({t.capitalize()} Entry Override)</b>\n"
                     f"Ticket: <code>{result.ticket}</code> | Volume: {result.volume or req.volume} lot @ {req.price}"
@@ -267,8 +420,11 @@ class TradingService:
         result: OrderResult,
         order_req: OrderRequest,
         status: str = "FILLED",
+        message_link: str | None = None,
     ) -> None:
         """Persist executed or placed order into PostgreSQL audit trail."""
+        if result.ticket and message_link:
+            self._order_message_links[result.ticket] = message_link
         if not signal_db_id:
             return
         try:
@@ -284,6 +440,8 @@ class TradingService:
                     price=result.price or order_req.price,
                     sl=order_req.sl,
                     tp=order_req.tp,
+                    tp1=order_req.tp1,
+                    tp2=order_req.tp2,
                     comment=order_req.comment,
                     status=status,
                     mt5_retcode=result.retcode,
@@ -328,9 +486,14 @@ class TradingService:
         is_reentry: bool = False,
         message_id: int | None = None,
         chat_id: int | None = None,
+        message_link: str | None = None,
     ) -> None:
         """Full pipeline: Raw message -> Parse -> Risk -> Execute -> Notify."""
-        logger.info("processing_signal_message", text=raw_text[:80])
+        logger.info("processing_signal_message", text=raw_text[:80], message_link=message_link)
+
+        if message_link is None and message_id is not None and chat_id is not None:
+            from app.telegram.utils import construct_telegram_message_link
+            message_link = construct_telegram_message_link(chat_id, message_id)
 
         signal = self.parser.parse(raw_text)
         signal.is_reentry = is_reentry
@@ -368,7 +531,11 @@ class TradingService:
                 await session.flush()
                 signal_db_id = sig_record.id
 
+                if signal_db_id and message_link:
+                    self._signal_message_links[signal_db_id] = message_link
+
                 if signal.new_order:
+                    meta = {"message_link": message_link} if message_link else None
                     parsed_record = DBParsedSignal(
                         signal_id=signal_db_id,
                         action=signal.new_order.action.value,
@@ -377,7 +544,9 @@ class TradingService:
                         entry_max=signal.new_order.entry_max,
                         stop_loss=signal.new_order.stop_loss,
                         take_profit=signal.new_order.take_profit,
+                        take_profit_2=signal.new_order.take_profit_2,
                         raw_tp_text=signal.new_order.raw_tp_text,
+                        extra_metadata=meta,
                     )
                     session.add(parsed_record)
         except Exception as e:
@@ -399,7 +568,7 @@ class TradingService:
                     f"Action: {signal.new_order.action.value} {signal.new_order.symbol}\n"
                     f"Reason: {decision.rejection_reason}"
                 )
-                await self.notify(msg)
+                await self.notify(self.format_notification(msg, message_link))
                 return
 
             action = signal.new_order.action
@@ -421,6 +590,18 @@ class TradingService:
 
             min_entry = signal.new_order.entry_min
             max_entry = signal.new_order.entry_max
+
+            # Ensure min_entry is further from SL, max_entry is closer to SL
+            if min_entry is not None and max_entry is not None and min_entry != max_entry:
+                sl = signal.new_order.stop_loss
+                if sl is not None:
+                    if abs(min_entry - sl) < abs(max_entry - sl):
+                        min_entry, max_entry = max_entry, min_entry
+                elif action == OrderAction.BUY and min_entry < max_entry:
+                    min_entry, max_entry = max_entry, min_entry
+                elif action == OrderAction.SELL and min_entry > max_entry:
+                    min_entry, max_entry = max_entry, min_entry
+
             has_dual_entry = (
                 self.risk_config.enable_dual_entry
                 and max_entry is not None
@@ -445,7 +626,9 @@ class TradingService:
                     volume=vol_min,
                     price=min_entry,
                     sl=signal.new_order.stop_loss,
-                    tp=signal.new_order.take_profit,
+                    tp=signal.new_order.take_profit_2 or signal.new_order.take_profit,
+                    tp1=signal.new_order.take_profit,
+                    tp2=signal.new_order.take_profit_2,
                     comment="bot-override-min",
                 )
             if max_entry is not None:
@@ -455,11 +638,13 @@ class TradingService:
                     volume=vol_max,
                     price=max_entry,
                     sl=signal.new_order.stop_loss,
-                    tp=signal.new_order.take_profit,
+                    tp=signal.new_order.take_profit_2 or signal.new_order.take_profit,
+                    tp1=signal.new_order.take_profit,
+                    tp2=signal.new_order.take_profit_2,
                     comment="bot-override-max",
                 )
             
-            # Check if price has completely exceeded the entire range (e.g. SELL and price > max_entry)
+            # Check if price has completely exceeded the entire range (e.g. SELL and price > max_entry, or BUY and price < max_entry)
             if has_dual_entry and max_entry is not None:
                 if action == OrderAction.SELL and current_price > max_entry:
                     warning_msg = (
@@ -469,21 +654,21 @@ class TradingService:
                         f"➡️ <i>Bỏ qua tín hiệu vì giá thị trường đã vượt quá toàn bộ vùng Entry!</i>"
                     )
                     from app.telegram.keyboards import build_override_keyboard
-                    self._pending_overrides[sig_id] = pending_reqs
+                    self._pending_overrides[sig_id] = {"orders": pending_reqs, "message_link": message_link}
                     kb = build_override_keyboard(sig_id)
-                    await self.notify(warning_msg, reply_markup=kb)
+                    await self.notify(self.format_notification(warning_msg, message_link), reply_markup=kb)
                     return
-                elif action == OrderAction.BUY and current_price < min(min_entry, max_entry):
+                elif action == OrderAction.BUY and current_price < max_entry:
                     warning_msg = (
-                        f"⚠️ <b>Cảnh báo: Giá hiện tại vượt quá vùng Entry</b>\n"
+                        f"⚠️ <b>Cảnh báo: Giá hiện tại vượt quá Max Entry</b>\n"
                         f"• Cặp: <b>{symbol}</b> (BUY)\n"
                         f"• Vùng Entry: <code>{min_entry} - {max_entry}</code> | Hiện tại: <code>{current_price}</code>\n"
                         f"➡️ <i>Bỏ qua tín hiệu vì giá thị trường đã vượt quá toàn bộ vùng Entry!</i>"
                     )
                     from app.telegram.keyboards import build_override_keyboard
-                    self._pending_overrides[sig_id] = pending_reqs
+                    self._pending_overrides[sig_id] = {"orders": pending_reqs, "message_link": message_link}
                     kb = build_override_keyboard(sig_id)
-                    await self.notify(warning_msg, reply_markup=kb)
+                    await self.notify(self.format_notification(warning_msg, message_link), reply_markup=kb)
                     return
 
             # Check if current price is in the middle zone (khoảng giữa) or beyond towards max_entry
@@ -521,9 +706,9 @@ class TradingService:
                     f"➡️ <i>Bỏ qua tín hiệu (tạm dừng đặt lệnh tự động) để bạn quyết định!</i>"
                 )
                 from app.telegram.keyboards import build_override_keyboard
-                self._pending_overrides[sig_id] = pending_reqs
+                self._pending_overrides[sig_id] = {"orders": pending_reqs, "message_link": message_link}
                 kb = build_override_keyboard(sig_id)
-                await self.notify(warning_msg, reply_markup=kb)
+                await self.notify(self.format_notification(warning_msg, message_link), reply_markup=kb)
                 return
 
             # order1_allowed logic is removed since we return early
@@ -533,7 +718,9 @@ class TradingService:
                 volume=vol_min,
                 price=current_price,
                 sl=signal.new_order.stop_loss,
-                tp=signal.new_order.take_profit,
+                tp=signal.new_order.take_profit_2 or signal.new_order.take_profit,
+                tp1=signal.new_order.take_profit,
+                tp2=signal.new_order.take_profit_2,
                 comment="bot-mid-entry" if is_mid_or_beyond else "bot-min-entry",
             )
             result_1 = await self.broker.open_order(order_req_1)
@@ -546,7 +733,7 @@ class TradingService:
                         "timestamp": time.time(),
                     }
                 )
-                await self._record_db_order(signal_db_id, result_1, order_req_1, status="FILLED")
+                await self._record_db_order(signal_db_id, result_1, order_req_1, status="FILLED", message_link=message_link)
                 entry_label = "(Mid Entry)" if is_mid_or_beyond else ("(Min Entry)" if has_dual_entry else "")
                 entry_tag = f" {entry_label}" if entry_label else ""
                 msg_1 = (
@@ -567,7 +754,7 @@ class TradingService:
                     f"Type: {order_req_1.order_type} {order_req_1.symbol}\n"
                     f"Retcode: {result_1.retcode} ({result_1.comment})"
                 )
-            await self.notify(msg_1)
+            await self.notify(self.format_notification(msg_1, message_link))
 
             # --- Order 2: Max Entry (Pending Limit ONLY - skipped if price in mid zone or reached max) ---
             if has_dual_entry and max_entry is not None and not is_mid_or_beyond:
@@ -589,7 +776,9 @@ class TradingService:
                         volume=vol_max,
                         price=order2_price,
                         sl=signal.new_order.stop_loss,
-                        tp=signal.new_order.take_profit,
+                        tp=signal.new_order.take_profit_2 or signal.new_order.take_profit,
+                        tp1=signal.new_order.take_profit,
+                        tp2=signal.new_order.take_profit_2,
                         comment="bot-max-entry",
                     )
                     result_2 = await self.broker.open_order(order_req_2)
@@ -600,6 +789,7 @@ class TradingService:
                             result_2,
                             order_req_2,
                             status="PLACED",
+                            message_link=message_link,
                         )
                         msg_2 = (
                             f"✅ <b>Order Placed (Max Entry)</b>\n"
@@ -614,7 +804,7 @@ class TradingService:
                             f"Type: {order2_type} {symbol}\n"
                             f"Retcode: {result_2.retcode} ({result_2.comment})"
                         )
-                    await self.notify(msg_2)
+                    await self.notify(self.format_notification(msg_2, message_link))
 
             return
 
@@ -622,9 +812,8 @@ class TradingService:
         if signal.message_type == MessageType.POSITION_MANAGEMENT:
             positions = await self.broker.get_positions(signal.symbol)
             if not positions:
-                await self.notify(
-                    f"ℹ️ Received management signal for {signal.symbol or 'all'}, but no open positions found."
-                )
+                no_pos_msg = f"ℹ️ Received management signal for {signal.symbol or 'all'}, but no open positions found."
+                await self.notify(self.format_notification(no_pos_msg, message_link))
                 return
 
             # Calculate VWAP (Volume-Weighted Average Price) for Breakeven
@@ -647,11 +836,12 @@ class TradingService:
 
                         res = await self.broker.close_position(pos.ticket, vol)
                         status_icon = "✅" if res.success else "❌"
-                        await self.notify(
+                        close_msg = (
                             f"{status_icon} <b>Position Management: Close</b>\n"
                             f"Ticket: <code>{pos.ticket}</code> | Vol: {vol} lot\n"
                             f"Result: {res.comment}"
                         )
+                        await self.notify(self.format_notification(close_msg, message_link))
                         
                         await self._insert_management_action(
                             signal_db_id=signal_db_id,
@@ -671,11 +861,12 @@ class TradingService:
                             be_sl = vwap_price + self.risk_config.breakeven_offset_price
                             be_res = await self.broker.modify_position(pos.ticket, sl=be_sl)
                             be_icon = "✅" if be_res.success else "⚠️"
-                            await self.notify(
+                            be_msg = (
                                 f"{be_icon} <b>Auto Breakeven on Partial</b>\n"
                                 f"Ticket: <code>{pos.ticket}</code> | SL (Middle): {be_sl}\n"
                                 f"Result: {be_res.comment}"
                             )
+                            await self.notify(self.format_notification(be_msg, message_link))
                             await self._insert_management_action(
                                 signal_db_id=signal_db_id,
                                 mt5_ticket=pos.ticket,
@@ -690,11 +881,12 @@ class TradingService:
                         new_sl = vwap_price + self.risk_config.breakeven_offset_price
                         res = await self.broker.modify_position(pos.ticket, sl=new_sl)
                         status_icon = "✅" if res.success else "❌"
-                        await self.notify(
+                        move_msg = (
                             f"{status_icon} <b>Position Management: Move SL to Middle Entry</b>\n"
                             f"Ticket: <code>{pos.ticket}</code> | New SL: {new_sl}\n"
                             f"Result: {res.comment}"
                         )
+                        await self.notify(self.format_notification(move_msg, message_link))
                         await self._insert_management_action(
                             signal_db_id=signal_db_id,
                             mt5_ticket=pos.ticket,
@@ -890,6 +1082,106 @@ class TradingService:
         except Exception as e:
             logger.warning("load_management_rules_failed", error=str(e))
         return 0
+
+    async def load_risk_config_from_db(self) -> RiskConfig:
+        """Load all dynamic configuration from PostgreSQL bot_config table."""
+        try:
+            from sqlalchemy import select
+            from app.config.database import get_session
+            from app.models.config import BotConfig
+
+            async with get_session() as session:
+                stmt = select(BotConfig)
+                result = await session.execute(stmt)
+                configs = result.scalars().all()
+
+                if configs:
+                    for cfg in configs:
+                        val = cfg.value
+                        if isinstance(val, dict):
+                            for k, v in val.items():
+                                if hasattr(self.risk_config, k):
+                                    self.risk_config.update_field(k, v)
+                        elif hasattr(self.risk_config, cfg.key):
+                            self.risk_config.update_field(cfg.key, val)
+
+                    logger.info("loaded_risk_config_from_db", enabled=self.risk_config.enabled)
+                    return self.risk_config
+        except Exception as e:
+            logger.warning("load_risk_config_from_db_failed", error=str(e))
+        return self.risk_config
+
+    async def save_risk_config_to_db(self, updated_by: str = "SYSTEM") -> bool:
+        """Persist current risk_config state to PostgreSQL bot_config table."""
+        try:
+            from sqlalchemy import select
+            from app.config.database import get_session
+            from app.models.config import BotConfig
+
+            grouped_configs = {
+                ("trading", "general"): {
+                    "enabled": bool(self.risk_config.enabled),
+                    "allowed_symbols": list(self.risk_config.allowed_symbols),
+                    "trading_hours": "ALL",
+                },
+                ("risk", "limits"): {
+                    "max_open_positions": int(self.risk_config.max_open_positions),
+                    "max_lot": float(self.risk_config.max_lot),
+                    "min_lot": float(self.risk_config.min_lot),
+                    "default_lot": float(self.risk_config.default_lot),
+                    "max_daily_loss_percent": float(self.risk_config.max_daily_loss_percent),
+                    "require_sl": bool(self.risk_config.require_sl),
+                    "require_tp": bool(self.risk_config.require_tp),
+                },
+                ("risk", "dual_entry"): {
+                    "enable_dual_entry": bool(self.risk_config.enable_dual_entry),
+                    "lot_min_entry": float(self.risk_config.lot_min_entry),
+                    "lot_max_entry": float(self.risk_config.lot_max_entry),
+                    "max_slippage_entry": float(self.risk_config.max_slippage_entry),
+                },
+                ("risk", "position_management"): {
+                    "default_partial_close_percent": float(self.risk_config.default_partial_close_percent),
+                    "auto_breakeven_on_partial": bool(self.risk_config.auto_breakeven_on_partial),
+                    "breakeven_offset_price": float(self.risk_config.breakeven_offset_price),
+                },
+                ("signal", "timing"): {
+                    "duplicate_timeout_seconds": int(self.risk_config.duplicate_timeout_seconds),
+                    "signal_expire_seconds": int(self.risk_config.signal_expire_seconds),
+                },
+            }
+
+            async with get_session() as session:
+                for (cat, key), val in grouped_configs.items():
+                    stmt = select(BotConfig).where(
+                        BotConfig.category == cat,
+                        BotConfig.key == key,
+                    )
+                    existing = (await session.execute(stmt)).scalar_one_or_none()
+                    if existing:
+                        merged = dict(existing.value or {})
+                        merged.update(val)
+                        existing.value = merged
+                        existing.updated_by = updated_by
+                    else:
+                        cfg = BotConfig(
+                            category=cat,
+                            key=key,
+                            value=val,
+                            updated_by=updated_by,
+                        )
+                        session.add(cfg)
+                await session.flush()
+            logger.info("saved_risk_config_to_db")
+            return True
+        except Exception as e:
+            logger.error("save_risk_config_to_db_failed", error=str(e))
+            return False
+
+    async def update_config_key(self, key: str, value: Any, updated_by: str = "ADMIN") -> bool:
+        """Update a config field in memory and persist immediately to database."""
+        if not self.risk_config.update_field(key, value):
+            return False
+        return await self.save_risk_config_to_db(updated_by=updated_by)
 
     async def add_or_update_management_rule(
         self,

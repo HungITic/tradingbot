@@ -220,15 +220,11 @@ async def test_service_excessive_slippage_skips_market_order_and_warns(mock_brok
     raw_signal = "Sell #XAU 4148 - 4160\nSL: 4170\nTP: Trên 200pips"
     await service.process_raw_message(raw_signal)
 
-    # Order 1 (Min Entry) skipped due to excessive slippage! Only Order 2 (Limit at 4160) placed.
-    assert mock_broker.open_order.call_count == 1
-    call_req_2 = mock_broker.open_order.call_args_list[0][0][0]
-    assert call_req_2.order_type == "SELL_LIMIT"
-    assert call_req_2.price == Decimal("4160")
+    # When excessive slippage, execution is paused for user decision (0 orders placed automatically)
+    assert mock_broker.open_order.call_count == 0
 
     # Warning alert must be in notifications
     assert any("Cảnh báo Min Entry: Vượt ngưỡng trượt giá" in n for n in notifications)
-    assert any("Order Placed (Max Entry)" in n for n in notifications)
 
 
 @pytest.mark.asyncio
@@ -527,5 +523,150 @@ async def test_service_get_performance_summary(mock_broker):
     assert stats["net_pnl"] == Decimal("24.00")  # 50 - 25 - 0.50 - 0.50
     assert stats["best_trade"] == Decimal("50.00")
     assert stats["worst_trade"] == Decimal("-25.00")
+
+
+@pytest.mark.asyncio
+async def test_service_tp1_and_tp2_milestones(mock_broker):
+    from datetime import datetime
+    from app.models.trade import Order as DBOrder
+
+    mock_broker.close_position = AsyncMock(return_value=OrderResult(success=True, comment="Closed"))
+    mock_broker.modify_position = AsyncMock(return_value=OrderResult(success=True, comment="Modified"))
+
+    service = TradingService(broker=mock_broker)
+    notifications = []
+    service.set_notification_callback(lambda msg: notifications.append(msg))
+
+    mock_order = DBOrder(
+        signal_id=1,
+        mt5_ticket=2001,
+        symbol="XAUUSD",
+        volume=Decimal("0.02"),
+        tp1=Decimal("4050"),
+        tp2=Decimal("4060"),
+    )
+
+    class MockScalars:
+        def all(self):
+            return [mock_order]
+
+    class MockSession:
+        async def scalars(self, stmt):
+            return MockScalars()
+        async def scalar(self, stmt):
+            return 1
+        def add(self, obj):
+            pass
+
+    class MockCtx:
+        async def __aenter__(self):
+            return MockSession()
+        async def __aexit__(self, *args):
+            pass
+
+    with patch("app.config.database.get_session", return_value=MockCtx()):
+        # 1. At TP1 (4052 >= 4050): Partial close 50% & move SL to entry
+        pos = PositionInfo(
+            ticket=2001,
+            symbol="XAUUSD",
+            volume=Decimal("0.02"),
+            open_price=Decimal("4040"),
+            current_price=Decimal("4052"),
+            sl=Decimal("4030"),
+            tp=Decimal("4060"),
+            profit=Decimal("24.0"),
+            swap=Decimal("0"),
+            commission=Decimal("0"),
+            position_type="BUY",
+            open_time=datetime.now(),
+        )
+        mock_broker.get_positions = AsyncMock(return_value=[pos])
+
+        await service._check_tp_milestones()
+        assert mock_broker.close_position.call_count == 1
+        assert mock_broker.close_position.call_args[0] == (2001, Decimal("0.01"))
+        assert mock_broker.modify_position.call_count == 1
+        assert mock_broker.modify_position.call_args[1]["sl"] == Decimal("4040")
+
+        # 2. Still around TP1, but already closed once -> should skip
+        pos_after = PositionInfo(
+            ticket=2001,
+            symbol="XAUUSD",
+            volume=Decimal("0.01"),
+            open_price=Decimal("4040"),
+            current_price=Decimal("4052"),
+            sl=Decimal("4040"),
+            tp=Decimal("4060"),
+            profit=Decimal("12.0"),
+            swap=Decimal("0"),
+            commission=Decimal("0"),
+            position_type="BUY",
+            open_time=datetime.now(),
+        )
+        mock_broker.get_positions = AsyncMock(return_value=[pos_after])
+        mock_broker.close_position.reset_mock()
+        mock_broker.modify_position.reset_mock()
+
+        await service._check_tp_milestones()
+        assert mock_broker.close_position.call_count == 0
+        assert mock_broker.modify_position.call_count == 0
+
+        # 3. At TP2 (4062 >= 4060) -> full close 100%
+        pos_tp2 = PositionInfo(
+            ticket=2001,
+            symbol="XAUUSD",
+            volume=Decimal("0.01"),
+            open_price=Decimal("4040"),
+            current_price=Decimal("4062"),
+            sl=Decimal("4040"),
+            tp=Decimal("4060"),
+            profit=Decimal("22.0"),
+            swap=Decimal("0"),
+            commission=Decimal("0"),
+            position_type="BUY",
+            open_time=datetime.now(),
+        )
+        mock_broker.get_positions = AsyncMock(return_value=[pos_tp2])
+        mock_broker.close_position.reset_mock()
+
+        await service._check_tp_milestones()
+        assert mock_broker.close_position.call_count == 1
+        assert mock_broker.close_position.call_args[0] == (2001, Decimal("0.01"))
+
+
+@pytest.mark.asyncio
+async def test_service_buy_dual_entry_min_and_max_entry_handling(mock_broker):
+    from datetime import datetime, timezone
+    # BUY 2750 - 2740, SL 2730
+    # min_entry is 2750 (xa SL), max_entry is 2740 (gần SL)
+    # Current price is 2749.0 (inside entry zone, favorable compared to 2750)
+    mock_broker.get_tick = AsyncMock(
+        return_value=TickInfo(
+            symbol="XAUUSDm",
+            bid=Decimal("2749.0"),
+            ask=Decimal("2749.5"),
+            time=datetime.now(timezone.utc),
+        )
+    )
+    service = TradingService(broker=mock_broker)
+    notifications = []
+    service.set_notification_callback(lambda msg: notifications.append(msg))
+
+    raw_signal = "BUY #XAU 2750 - 2740\nSL: 2730\nTP: 2780"
+    await service.process_raw_message(raw_signal)
+
+    # 2 orders should be placed:
+    # Order 1: Market BUY at 2749.0 (Min Entry)
+    # Order 2: BUY_LIMIT at 2740 (Max Entry, gần SL)
+    assert mock_broker.open_order.call_count == 2
+    call_req_1 = mock_broker.open_order.call_args_list[0][0][0]
+    assert call_req_1.order_type == "BUY"
+    assert call_req_1.price == Decimal("2749.5")  # Ask price for BUY order
+
+    call_req_2 = mock_broker.open_order.call_args_list[1][0][0]
+    assert call_req_2.order_type == "BUY_LIMIT"
+    assert call_req_2.price == Decimal("2740")  # Max Entry (gần SL)
+
+
 
 

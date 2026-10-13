@@ -33,17 +33,48 @@ class ManagementRuleDefinition:
 
 
 DEFAULT_RULES: list[ManagementRuleDefinition] = [
+    # Partial close (chốt bớt / chốt 1 phần)
+    ManagementRuleDefinition("chốt bớt 1 phần", ManagementType.PARTIAL_CLOSE, {"percentage": Decimal("50")}, priority=12),
+    ManagementRuleDefinition("chốt 1 phần", ManagementType.PARTIAL_CLOSE, {"percentage": Decimal("50")}, priority=11),
+    ManagementRuleDefinition("chốt lãi 1 phần", ManagementType.PARTIAL_CLOSE, {"percentage": Decimal("50")}, priority=11),
+    ManagementRuleDefinition("chốt bớt lãi", ManagementType.PARTIAL_CLOSE, {"percentage": Decimal("50")}, priority=11),
     ManagementRuleDefinition("chốt bớt", ManagementType.PARTIAL_CLOSE, {"percentage": Decimal("50")}, priority=10),
+
+    # Full close (chốt hết / chốt all / đóng lệnh)
     ManagementRuleDefinition("chốt hết", ManagementType.CLOSE, {"percentage": Decimal("100")}, priority=10),
+    ManagementRuleDefinition("chốt all", ManagementType.CLOSE, {"percentage": Decimal("100")}, priority=10),
+    ManagementRuleDefinition("chốt nha", ManagementType.CLOSE, {"percentage": Decimal("100")}, priority=9),
+    ManagementRuleDefinition("chốt nhé", ManagementType.CLOSE, {"percentage": Decimal("100")}, priority=9),
+    ManagementRuleDefinition("chốt đi", ManagementType.CLOSE, {"percentage": Decimal("100")}, priority=9),
     ManagementRuleDefinition("chốt lời", ManagementType.CLOSE, {"percentage": Decimal("100")}, priority=8),
-    # ManagementRuleDefinition("chốt", ManagementType.CLOSE, {"percentage": Decimal("100")}, priority=5),
-    ManagementRuleDefinition("dời sl", ManagementType.MOVE_SL, {"target": "ENTRY"}, priority=8),
+    ManagementRuleDefinition("đóng lệnh", ManagementType.CLOSE, {"percentage": Decimal("100")}, priority=8),
+    ManagementRuleDefinition("đóng hết", ManagementType.CLOSE, {"percentage": Decimal("100")}, priority=8),
+    ManagementRuleDefinition("đóng hoà", ManagementType.CLOSE, {"percentage": Decimal("100")}, priority=8),
+    ManagementRuleDefinition("đóng hòa", ManagementType.CLOSE, {"percentage": Decimal("100")}, priority=8),
+    ManagementRuleDefinition("đóng âm", ManagementType.CLOSE, {"percentage": Decimal("100")}, priority=8),
+    ManagementRuleDefinition("đóng buy", ManagementType.CLOSE, {"percentage": Decimal("100")}, priority=8),
+    ManagementRuleDefinition("đóng sell", ManagementType.CLOSE, {"percentage": Decimal("100")}, priority=8),
+    ManagementRuleDefinition("cắt hết", ManagementType.CLOSE, {"percentage": Decimal("100")}, priority=8),
+    ManagementRuleDefinition("dừng", ManagementType.CLOSE, {"percentage": Decimal("100")}, priority=1),
+
+    # Move SL / Breakeven
+    ManagementRuleDefinition("dời sl về entry", ManagementType.MOVE_SL, {"target": "ENTRY"}, priority=10),
+    ManagementRuleDefinition("dời sl hoà", ManagementType.BREAKEVEN, {"target": "ENTRY"}, priority=10),
+    ManagementRuleDefinition("dời sl hòa", ManagementType.BREAKEVEN, {"target": "ENTRY"}, priority=10),
+    ManagementRuleDefinition("dời sl huề", ManagementType.BREAKEVEN, {"target": "ENTRY"}, priority=10),
+    ManagementRuleDefinition("dịch stop loss", ManagementType.MOVE_SL, {"target": "ENTRY"}, priority=9),
+    ManagementRuleDefinition("dời stop loss", ManagementType.MOVE_SL, {"target": "ENTRY"}, priority=9),
     ManagementRuleDefinition("dịch stoploss", ManagementType.MOVE_SL, {"target": "ENTRY"}, priority=8),
     ManagementRuleDefinition("dời stoploss", ManagementType.MOVE_SL, {"target": "ENTRY"}, priority=8),
+    ManagementRuleDefinition("dịch sl", ManagementType.MOVE_SL, {"target": "ENTRY"}, priority=8),
+    ManagementRuleDefinition("dời sl", ManagementType.MOVE_SL, {"target": "ENTRY"}, priority=8),
+    ManagementRuleDefinition("kéo sl dương", ManagementType.MOVE_SL, {"target": "ENTRY"}, priority=8),
     ManagementRuleDefinition("kéo sl", ManagementType.MOVE_SL, {"target": "ENTRY"}, priority=8),
     ManagementRuleDefinition("hòa vốn", ManagementType.BREAKEVEN, {"target": "ENTRY"}, priority=8),
+    ManagementRuleDefinition("hoà vốn", ManagementType.BREAKEVEN, {"target": "ENTRY"}, priority=8),
     ManagementRuleDefinition("breakeven", ManagementType.BREAKEVEN, {"target": "ENTRY"}, priority=8),
-    ManagementRuleDefinition("dừng", ManagementType.CLOSE, {"percentage": Decimal("100")}, priority=1),
+
+    # Re-entry
     ManagementRuleDefinition("vào lại", ManagementType.REENTRY, {}, priority=8),
     ManagementRuleDefinition("vòng 2", ManagementType.REENTRY, {}, priority=8),
     ManagementRuleDefinition("re-enter", ManagementType.REENTRY, {}, priority=8),

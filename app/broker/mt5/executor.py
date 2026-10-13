@@ -79,38 +79,49 @@ class MT5Executor(BrokerAdapter):
         if clean_upper in self._symbol_cache:
             return self._symbol_cache[clean_upper]
 
+        def _is_tradeable(sym_info: Any) -> bool:
+            if sym_info is None:
+                return False
+            trade_mode = getattr(sym_info, "trade_mode", 4)
+            # trade_mode 0 is SYMBOL_TRADE_MODE_DISABLED in MT5
+            return trade_mode != 0
+
         # 1. Direct check in MT5
         raw_info = await self._client.run_in_thread(mt5.symbol_info, clean)
-        if raw_info is not None:
+        if _is_tradeable(raw_info):
+            await self._client.run_in_thread(mt5.symbol_select, raw_info.name, True)
             self._symbol_cache[clean_upper] = raw_info.name
             return raw_info.name
 
         if clean != clean_upper:
             raw_info = await self._client.run_in_thread(mt5.symbol_info, clean_upper)
-            if raw_info is not None:
+            if _is_tradeable(raw_info):
+                await self._client.run_in_thread(mt5.symbol_select, raw_info.name, True)
                 self._symbol_cache[clean_upper] = raw_info.name
                 return raw_info.name
 
-        # 2. Check candidate suffixes commonly used by brokers (Exness, IC Markets, etc.)
+        # 2. Check candidate suffixes commonly used by brokers (Cent, Standard, Pro, etc.)
         candidates: list[str] = [
-            f"{clean_upper}m",      # Exness Standard/Trial (e.g. XAUUSDm)
+            f"{clean_upper}.c",     # Cent with dot (PU Prime, XM, etc.)
+            f"{clean_upper}c",      # Cent (e.g. XAUUSDc)
             f"{clean_upper}.m",    # Micro / Cent
-            f"{clean_upper}c",      # Cent
+            f"{clean_upper}m",      # Exness Standard/Trial (e.g. XAUUSDm)
+            f"{clean_upper}.s",    # Zero spread
             f"{clean_upper}.raw",  # Raw spread
             f"{clean_upper}pro",   # Pro
-            f"{clean_upper}_i",    # Index / Institutional
-            f"{clean_upper}.s",    # Zero spread
             f"{clean_upper}+",     # VIP
+            f"{clean_upper}_i",    # Index / Institutional
         ]
 
         # If symbol already has suffix, also candidate stripped base
-        for suf in ("M", "C", ".M", ".RAW", "PRO", "_I", ".S", "+"):
+        for suf in ("M", "C", ".M", ".C", ".RAW", "PRO", "_I", ".S", "+", ".CRP", "CRP"):
             if clean_upper.endswith(suf):
                 candidates.append(clean_upper[: -len(suf)])
 
         for cand in candidates:
             cand_info = await self._client.run_in_thread(mt5.symbol_info, cand)
-            if cand_info is not None:
+            if _is_tradeable(cand_info):
+                await self._client.run_in_thread(mt5.symbol_select, cand_info.name, True)
                 logger.info("symbol_resolved_candidate", original=symbol, resolved=cand_info.name)
                 self._symbol_cache[clean_upper] = cand_info.name
                 return cand_info.name
@@ -119,13 +130,23 @@ class MT5Executor(BrokerAdapter):
         try:
             all_syms = await self._client.run_in_thread(mt5.symbols_get)
             if all_syms:
+                # Filter ONLY tradeable symbols (exclude disabled symbols like .crp)
+                tradeable_syms = [s for s in all_syms if _is_tradeable(s)]
                 base_name = clean_upper.rstrip("M").rstrip("C")
-                for s in all_syms:
+                matching = []
+                for s in tradeable_syms:
                     s_name = s.name.upper()
                     if s_name.startswith(clean_upper) or (len(base_name) >= 3 and s_name.startswith(base_name)):
-                        logger.info("symbol_resolved_search", original=symbol, resolved=s.name)
-                        self._symbol_cache[clean_upper] = s.name
-                        return s.name
+                        matching.append(s)
+
+                if matching:
+                    # Sort: prefer visible symbols in Market Watch, and deprioritize .crp
+                    matching.sort(key=lambda s: (not getattr(s, "visible", False), ".crp" in s.name.lower()))
+                    best = matching[0]
+                    await self._client.run_in_thread(mt5.symbol_select, best.name, True)
+                    logger.info("symbol_resolved_search", original=symbol, resolved=best.name)
+                    self._symbol_cache[clean_upper] = best.name
+                    return best.name
         except Exception as e:
             logger.warning("symbol_search_failed", symbol=symbol, error=str(e))
 
