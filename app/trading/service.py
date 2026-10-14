@@ -123,6 +123,13 @@ class TradingService:
         if getattr(self, "_sync_task", None) is None:
             self._sync_task = asyncio.create_task(self._sync_loop())
 
+    def stop_sync_job(self) -> None:
+        """Stop the background MT5 sync task."""
+        task = getattr(self, "_sync_task", None)
+        if task and not task.done():
+            task.cancel()
+            self._sync_task = None
+
     async def _sync_loop(self) -> None:
         import asyncio
         from datetime import datetime, timedelta
@@ -228,6 +235,8 @@ class TradingService:
 
                 # Reconcile dual-entry pending orders (cancel remaining limit if sibling closed)
                 await self._reconcile_dual_entry_pending_orders()
+            except asyncio.CancelledError:
+                break
             except Exception as e:
                 import traceback
                 logger.error("sync_loop_error", error=str(e), traceback=traceback.format_exc())

@@ -135,7 +135,13 @@ class Application:
         except Exception:
             pass
 
-        # 1. Stop Signal Listener
+        # 1. Stop Sync Job
+        try:
+            trading_service.stop_sync_job()
+        except Exception as e:
+            logger.warning("error_stopping_sync_job", error=str(e))
+
+        # 2. Stop Signal Listener
         try:
             await signal_listener.stop()
         except Exception as e:
