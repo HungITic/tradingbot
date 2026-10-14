@@ -8,15 +8,37 @@ and threadpool offloading so synchronous MT5 IPC calls don't block asyncio.
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 from typing import Any, Callable
 
 import structlog
 
-import sys
-
 from app.config.settings import settings
 
 logger = structlog.get_logger(__name__)
+
+
+def _ensure_wine_environment() -> None:
+    """Auto-fix python39._pth in Wine on macOS Apple Silicon if needed."""
+    if sys.platform != "darwin":
+        return
+    try:
+        wineprefix = os.environ.get(
+            "WINEPREFIX",
+            os.path.expanduser("~/Library/Application Support/net.metaquotes.wine.metatrader5"),
+        )
+        wine_pth = os.path.join(wineprefix, "drive_c", "Python39", "python39._pth")
+        if os.path.exists(wine_pth):
+            with open(wine_pth, "r", encoding="utf-8") as f:
+                content = f.read()
+            if "Lib\\site-packages" not in content and "Lib/site-packages" not in content:
+                with open(wine_pth, "w", encoding="utf-8") as f:
+                    f.write("python39.zip\n.\nLib\\site-packages\nimport site\n")
+                logger.info("wine_python_pth_auto_repaired", path=wine_pth)
+    except Exception as e:
+        logger.debug("wine_python_pth_check_skipped", error=str(e))
+
 
 # Import MT5 library (native MetaTrader5 on Windows, mt5_mac bridge on macOS Apple Silicon)
 if sys.platform == "win32":
@@ -62,6 +84,7 @@ class MT5Client:
             logger.info("mt5_connecting", server=settings.mt5.server, login=settings.mt5.login)
 
             def _init() -> bool:
+                _ensure_wine_environment()
                 init_kwargs: dict[str, Any] = {"portable": True}
                 if settings.mt5.path:
                     init_kwargs["path"] = settings.mt5.path
@@ -72,13 +95,17 @@ class MT5Client:
                 if settings.mt5.server:
                     init_kwargs["server"] = settings.mt5.server
 
-                ok = mt5.initialize(**init_kwargs)
-                if not ok:
-                    # Retry without path if path failed
-                    if "path" in init_kwargs:
-                        init_kwargs.pop("path")
-                        ok = mt5.initialize(**init_kwargs)
-                return ok
+                try:
+                    ok = mt5.initialize(**init_kwargs)
+                    if not ok:
+                        # Retry without path if path failed
+                        if "path" in init_kwargs:
+                            init_kwargs.pop("path")
+                            ok = mt5.initialize(**init_kwargs)
+                    return ok
+                except Exception as e:
+                    logger.error("mt5_initialize_exception", error=str(e))
+                    return False
 
             ok = await self.run_in_thread(_init)
 

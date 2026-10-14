@@ -4,7 +4,9 @@ Auto-patcher for mt5_mac on Apple Silicon (M1/M2/M3/M4).
 Ensures:
 1. Wine binary path compatibility (wine vs wine64).
 2. Python 3.9 pip bootstrap URL.
-3. terminal_info() API support.
+3. python39._pth includes Lib\\site-packages.
+4. terminal_info() API support.
+5. MetaTrader5 package verification & installation inside Wine Python.
 
 Run:
     python scripts/patch_mt5_mac.py
@@ -45,6 +47,35 @@ def patch_mt5_mac() -> None:
                 '_wine = f"{MT5_APP}/Contents/SharedSupport/wine/bin/wine"\n'
                 'WINE_BIN = _wine64 if os.path.exists(_wine64) else _wine',
             )
+
+        # Ensure python39._pth includes Lib\site-packages in _install_python_embeddable
+        old_pth_code = 'content = content.replace("#import site", "import site")'
+        new_pth_code = (
+            'content = content.replace("#import site", "import site").replace("# import site", "import site")\n'
+            '        if "Lib\\\\site-packages" not in content and "Lib/site-packages" not in content:\n'
+            '            content = "python39.zip\\n.\\nLib\\\\site-packages\\nimport site\\n"'
+        )
+        if old_pth_code in content:
+            content = content.replace(old_pth_code, new_pth_code)
+
+        # Ensure python39._pth is auto-fixed in ensure_environment before installing MT5
+        check_mt5_target = '    if not _check_mt5_installed(wine_bin, wineprefix, python_exe_wine):'
+        if check_mt5_target in content and "_fix_pth" not in content:
+            pth_fix_snippet = (
+                '    # Auto-fix python39._pth so pip and site-packages can be imported\n'
+                '    _pth_file = os.path.join(wineprefix, "drive_c", "Python39", "python39._pth")\n'
+                '    if os.path.exists(_pth_file):\n'
+                '        try:\n'
+                '            with open(_pth_file, "r") as _fix_pth:\n'
+                '                _pth_data = _fix_pth.read()\n'
+                '            if "Lib\\\\site-packages" not in _pth_data and "Lib/site-packages" not in _pth_data:\n'
+                '                with open(_pth_file, "w") as _fix_pth:\n'
+                '                    _fix_pth.write("python39.zip\\n.\\nLib\\\\site-packages\\nimport site\\n")\n'
+                '        except Exception:\n'
+                '            pass\n\n'
+                '    if not _check_mt5_installed(wine_bin, wineprefix, python_exe_wine):'
+            )
+            content = content.replace(check_mt5_target, pth_fix_snippet, 1)
 
         with open(bootstrap_file, "w", encoding="utf-8") as f:
             f.write(content)
@@ -173,6 +204,54 @@ def terminal_info() -> MqlTerminalInfo | None:
             with open(init_file, "w", encoding="utf-8") as f:
                 f.write(content)
         print("  ✅ __init__.py checked/patched.")
+
+    # 6. Fix python39._pth in Wine Python directory if already extracted
+    wineprefix = os.environ.get(
+        "WINEPREFIX",
+        os.path.expanduser("~/Library/Application Support/net.metaquotes.wine.metatrader5")
+    )
+    wine_pth = os.path.join(wineprefix, "drive_c", "Python39", "python39._pth")
+    try:
+        if os.path.exists(wine_pth):
+            with open(wine_pth, "r", encoding="utf-8") as f:
+                pth_content = f.read()
+            if "Lib\\site-packages" not in pth_content and "Lib/site-packages" not in pth_content:
+                with open(wine_pth, "w", encoding="utf-8") as f:
+                    f.write("python39.zip\n.\nLib\\site-packages\nimport site\n")
+                print("  ✅ Fixed python39._pth in Wine Python directory (enabled Lib\\site-packages).")
+            else:
+                print("  ✅ python39._pth already contains Lib\\site-packages.")
+    except Exception as e:
+        print(f"  ⚠️ Could not update wine python39._pth directly: {e}")
+
+    # 7. Check and install MetaTrader5 inside Wine Python if needed
+    try:
+        import subprocess
+        wine_bin = "/Applications/MetaTrader 5.app/Contents/SharedSupport/wine/bin/wine"
+        wine_bin64 = "/Applications/MetaTrader 5.app/Contents/SharedSupport/wine/bin/wine64"
+        actual_wine = wine_bin64 if os.path.exists(wine_bin64) else wine_bin
+        python_exe = os.path.join(wineprefix, "drive_c", "Python39", "python.exe")
+
+        if os.path.exists(actual_wine) and os.path.exists(python_exe):
+            env = {**os.environ, "WINEPREFIX": wineprefix}
+            check = subprocess.run(
+                [actual_wine, "C:\\Python39\\python.exe", "-c", "import MetaTrader5; print('ok')"],
+                capture_output=True, text=True, env=env
+            )
+            if check.returncode != 0 or check.stdout.strip() != "ok":
+                print("  📦 Installing MetaTrader5 package inside Wine Python...")
+                install_res = subprocess.run(
+                    [actual_wine, "C:\\Python39\\python.exe", "-m", "pip", "install", "MetaTrader5"],
+                    capture_output=True, text=True, env=env, timeout=180
+                )
+                if install_res.returncode == 0:
+                    print("  ✅ MetaTrader5 package installed successfully in Wine!")
+                else:
+                    print(f"  ⚠️ Pip install MetaTrader5 returned code {install_res.returncode}")
+            else:
+                print("  ✅ MetaTrader5 package is verified inside Wine.")
+    except Exception as e:
+        print(f"  ⚠️ Could not verify Wine MetaTrader5: {e}")
 
     print("\n🎉 mt5_mac is fully patched and ready on Apple Silicon!")
 
