@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Service identifier -->
+    <key>Label</key>
+    <string>com.tradingbot</string>
+
+    <!-- Script to execute -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/itic/Documents/trading-bot/scripts/run_daemon.sh</string>
+    </array>
+
+    <!-- Working directory -->
+    <key>WorkingDirectory</key>
+    <string>/Users/itic/Documents/trading-bot</string>
+
+    <!-- Automatically start when user logs in -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Automatically restart if process exits or crashes -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Throttle rapid crash loops (seconds between restart attempts) -->
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <!-- Environment variables -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>PYTHONPATH</key>
+        <string>/Users/itic/Documents/trading-bot</string>
+    </dict>
+
+    <!-- Log files -->
+    <key>StandardOutPath</key>
+    <string>/Users/itic/Documents/trading-bot/logs/bot.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/itic/Documents/trading-bot/logs/bot_error.log</string>
+</dict>
+</plist>

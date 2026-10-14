@@ -4,7 +4,9 @@ Personal Telegram Bot — Admin Console & Control Plane.
 
 from __future__ import annotations
 
+import dataclasses
 import functools
+import re
 from decimal import Decimal
 from typing import Any
 
@@ -29,6 +31,7 @@ from app.telegram.keyboards import (
     build_stats_keyboard,
     build_status_keyboard,
 )
+from app.core.timezone import format_vietnam_time, now_vietnam
 from app.trading.service import TradingService, trading_service
 
 logger = structlog.get_logger(__name__)
@@ -56,10 +59,11 @@ def admin_only(func):
             target = update.effective_message if update else None
             if target:
                 await target.reply_text(
-                    f"⛔ <b>Từ chối truy cập (Unauthorized)</b>\n"
-                    f"• User ID của bạn: <code>{user_id}</code>\n"
-                    f"• Chat ID hiện tại: <code>{chat_id}</code>\n"
-                    f"• Admin ID trong hệ thống: <code>{admin_id}</code>",
+                    f"⛔ <b>Từ Chối Truy Cập</b>\n"
+                    f"━━━━━━━━━━━━━━━━\n"
+                    f"User ID: <code>{user_id}</code>\n"
+                    f"Chat ID: <code>{chat_id}</code>\n"
+                    f"Admin ID: <code>{admin_id}</code>",
                     parse_mode=ParseMode.HTML,
                 )
             return
@@ -191,18 +195,18 @@ class PersonalTelegramBot:
     @admin_only
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         msg = (
-            "🤖 <b>Trading Bot V1 — Admin Console</b>\n\n"
-            "Welcome! You have full control plane access.\n\n"
-            "<b>Quick Commands:</b>\n"
-            "• /status — Tổng quan hệ thống & tài khoản\n"
-            "• /positions — Danh sách lệnh đang mở & nút thao tác\n"
-            "• /history — Lịch sử lệnh đã đóng (P&amp;L từng lệnh)\n"
-            "• /stats — Báo cáo hiệu suất & tỷ lệ Win/Loss\n"
-            "• /balance — Số dư, Equity, Margin\n"
-            "• /replay &lt;link&gt; — Nạp lại tín hiệu từ link tin nhắn Telegram\n"
-            "• /config — Cấu hình rủi ro & bot\n"
-            "• /rules — Quản lý từ khóa tiếng Việt (Keywords)\n"
-            "• /help — Toàn bộ danh mục lệnh"
+            "━━━━━━━━━━━━━━━━\n"
+            "🤖 <b>Trading Bot — Bảng Điều Khiển</b>\n\n"
+            "Xin chào! Bạn có toàn quyền quản lý bot.\n\n"
+            "📌 <b>Lệnh nhanh:</b>\n"
+            "/status — Tổng quan hệ thống\n"
+            "/positions — Vị thế đang mở\n"
+            "/history — Lịch sử giao dịch\n"
+            "/stats — Hiệu suất &amp; Win/Loss\n"
+            "/balance — Số dư tài khoản\n"
+            "/config — Cấu hình bot\n"
+            "/help — Tất cả lệnh\n"
+            "━━━━━━━━━━━━━━━━"
         )
         if update.effective_message:
             await update.effective_message.reply_text(msg, parse_mode=ParseMode.HTML)
@@ -210,37 +214,38 @@ class PersonalTelegramBot:
     @admin_only
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         msg = (
-            "📖 <b>Command Reference</b>\n\n"
-            "<b>📊 Trading & Positions:</b>\n"
-            "/status — Live overview & quick buttons\n"
-            "/positions — Open positions with interactive buttons\n"
-            "/history [days] — Xem lịch sử lệnh đã đóng (mặc định 7 ngày, VD: <code>/history 30</code>)\n"
-            "/stats [days] — Thống kê Win/Loss, Win Rate, Profit Factor (VD: <code>/stats 30</code>)\n"
-            "/balance — Live balance and equity\n"
-            "/close &lt;ticket&gt; — Close specific position\n"
-            "/closeall — Emergency close all open positions\n"
-            "/partial &lt;ticket&gt; &lt;%&gt; — Partial close (e.g. <code>/partial 12345 50</code>)\n"
-            "/setsl &lt;ticket&gt; &lt;price&gt; — Update Stop Loss\n"
-            "/settp &lt;ticket&gt; &lt;price&gt; — Update Take Profit\n"
-            "/breakeven &lt;ticket&gt; — Move SL to entry price\n\n"
-            "<b>🔄 Nạp lại tín hiệu (Signal Replay):</b>\n"
-            "/replay &lt;link&gt; — Nạp lại tín hiệu bằng link Telegram\n"
-            "  <i>VD:</i> <code>/replay https://t.me/MegaLodonGOLDForex/1241</code>\n"
-            "  <i>(Hoặc dán trực tiếp link tin nhắn Telegram vào chat)</i>\n\n"
-            "<b>📝 Quản lý từ khóa tiếng Việt (Rules):</b>\n"
-            "/rules — Xem toàn bộ từ khóa quản lý lệnh\n"
-            "/rule add &lt;từ khóa&gt; &lt;action&gt; [params] — Thêm từ khóa\n"
-            "/rule del &lt;từ khóa&gt; — Xóa từ khóa\n"
-            "/rules reload — Nạp lại từ PostgreSQL\n\n"
-            "<b>⚙️ Dynamic Configuration:</b>\n"
-            "/config — View all settings\n"
-            "/config risk — Interactive Risk tuning buttons\n"
-            "/config set &lt;key&gt; &lt;value&gt; — Update any parameter instantly\n\n"
-            "<b>🛑 Bot Control:</b>\n"
-            "/pause — Temporarily pause signal execution\n"
-            "/resume — Resume trading\n"
-            "/health — Health check MT5 & database\n"
-            "/kill — Emergency disable all operations"
+            "📖 <b>Danh Mục Lệnh</b>\n"
+            "━━━━━━━━━━━━━━━━\n\n"
+            "<b>📊 Giao dịch &amp; Vị thế:</b>\n"
+            "/status — Tổng quan hệ thống\n"
+            "/positions — Vị thế đang mở\n"
+            "/history [ngày] — Lịch sử lệnh đã đóng\n"
+            "/stats [ngày] — Thống kê Win/Loss\n"
+            "/balance — Số dư &amp; Equity\n"
+            "/close &lt;ticket&gt; — Đóng lệnh\n"
+            "/closeall — Đóng tất cả lệnh\n"
+            "/partial &lt;ticket&gt; &lt;%&gt; — Chốt một phần\n"
+            "/setsl &lt;ticket&gt; &lt;giá&gt; — Đặt Stop Loss\n"
+            "/settp &lt;ticket&gt; &lt;giá&gt; — Đặt Take Profit\n"
+            "/breakeven &lt;ticket&gt; — Dời SL về Entry\n\n"
+            "<b>🔄 Nạp lại tín hiệu:</b>\n"
+            "/replay &lt;link&gt; — Nạp tín hiệu từ link Telegram\n"
+            "  <i>Hoặc dán trực tiếp link vào chat</i>\n\n"
+            "<b>📝 Từ khóa quản lý lệnh:</b>\n"
+            "/rules — Xem danh sách từ khóa\n"
+            "/rule add &lt;từ khóa&gt; &lt;action&gt; [params] — Thêm\n"
+            "/rule del &lt;từ khóa&gt; — Xóa\n"
+            "/rules reload — Nạp lại từ DB\n\n"
+            "<b>⚙️ Cấu hình:</b>\n"
+            "/config — Xem tất cả cấu hình\n"
+            "/config risk — Nút chỉnh nhanh\n"
+            "/config set &lt;key&gt; &lt;value&gt; — Cập nhật tham số\n\n"
+            "<b>🛑 Điều khiển Bot:</b>\n"
+            "/pause — Tạm dừng giao dịch\n"
+            "/resume — Tiếp tục giao dịch\n"
+            "/health — Kiểm tra kết nối\n"
+            "/kill — Dừng khẩn cấp\n"
+            "━━━━━━━━━━━━━━━━"
         )
         if update.effective_message:
             await update.effective_message.reply_text(msg, parse_mode=ParseMode.HTML)
@@ -248,18 +253,22 @@ class PersonalTelegramBot:
     @admin_only
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         summary = await self.service.get_status_summary()
-        status_icon = "🟢 ACTIVE" if summary["bot_enabled"] else "🔴 PAUSED"
-        conn_icon = "✅ CONNECTED" if summary["connected"] else "❌ DISCONNECTED"
+        status_icon = "🟢 HOẠT ĐỘNG" if summary["bot_enabled"] else "🔴 TẠM DỪNG"
+        conn_icon = "✅ Đã kết nối" if summary["connected"] else "❌ Mất kết nối"
+        now_vn = now_vietnam().strftime("%H:%M:%S %d/%m/%Y")
 
         msg = (
-            f"📊 <b>System & Trading Status</b>\n\n"
-            f"<b>Bot Status:</b> {status_icon}\n"
-            f"<b>MT5 Broker:</b> {conn_icon} (Server: <code>{summary['server']}</code>)\n"
-            f"<b>Account Login:</b> <code>{summary['login']}</code>\n\n"
-            f"💰 <b>Balance:</b> {summary['balance']} {summary['currency']}\n"
-            f"📈 <b>Equity:</b> {summary['equity']} {summary['currency']}\n"
-            f"🔒 <b>Margin:</b> {summary['margin']} | <b>Free:</b> {summary['free_margin']}\n"
-            f"📂 <b>Open Positions:</b> {summary['open_positions_count']}"
+            f"📊 <b>Tổng Quan Hệ Thống</b>\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"⏱ {now_vn}\n\n"
+            f"<b>Bot:</b> {status_icon}\n"
+            f"<b>MT5:</b> {conn_icon} — <code>{summary['server']}</code>\n"
+            f"<b>Tài khoản:</b> <code>{summary['login']}</code>\n\n"
+            f"<b>Số dư:</b> {summary['balance']} {summary['currency']}\n"
+            f"<b>Equity:</b> {summary['equity']} {summary['currency']}\n"
+            f"<b>Margin:</b> {summary['margin']} | <b>Khả dụng:</b> {summary['free_margin']}\n"
+            f"<b>Vị thế mở:</b> {summary['open_positions_count']}\n"
+            f"━━━━━━━━━━━━━━━━"
         )
         keyboard = build_status_keyboard(summary["bot_enabled"])
         await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=keyboard)
@@ -268,15 +277,18 @@ class PersonalTelegramBot:
     async def cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         positions = await self.service.broker.get_positions()
         if not positions:
-            await update.message.reply_text("📂 <b>No open positions.</b>", parse_mode=ParseMode.HTML)
+            await update.message.reply_text("📂 <b>Không có vị thế đang mở.</b>", parse_mode=ParseMode.HTML)
             return
 
-        lines = ["📂 <b>Active Positions:</b>\n"]
+        lines = ["📂 <b>Vị Thế Đang Mở</b>\n━━━━━━━━━━━━━━━━\n"]
         for p in positions:
             pnl_icon = "🟢" if p.profit >= 0 else "🔴"
+            open_time_str = format_vietnam_time(p.open_time, "%H:%M %d/%m")
             lines.append(
-                f"• Ticket <code>{p.ticket}</code>: {p.position_type} {p.volume} <b>{p.symbol}</b> @ {p.open_price}\n"
-                f"  Curr: {p.current_price} | PnL: {pnl_icon} <b>${p.profit:.2f}</b> | SL: {p.sl or 'None'} | TP: {p.tp or 'None'}"
+                f"{pnl_icon} <b>{p.symbol}</b> {p.position_type} {p.volume} lot\n"
+                f"  Entry: <code>{p.open_price}</code> → Hiện tại: <code>{p.current_price}</code>\n"
+                f"  PnL: <b>${p.profit:.2f}</b> | SL: {p.sl or '—'} | TP: {p.tp or '—'}\n"
+                f"  Ticket: <code>{p.ticket}</code> | Mở: {open_time_str}"
             )
 
         keyboard = build_positions_keyboard(positions)
@@ -286,38 +298,105 @@ class PersonalTelegramBot:
     async def cmd_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         acc = await self.service.broker.get_account_info()
         msg = (
-            f"💰 <b>Account Financial Overview</b>\n\n"
-            f"<b>Balance:</b> {acc.balance} {acc.currency}\n"
+            f"💰 <b>Số Dư Tài Khoản</b>\n"
+            f"━━━━━━━━━━━━━━━━\n\n"
+            f"<b>Số dư:</b> {acc.balance} {acc.currency}\n"
             f"<b>Equity:</b> {acc.equity} {acc.currency}\n"
-            f"<b>Margin Used:</b> {acc.margin}\n"
-            f"<b>Free Margin:</b> {acc.free_margin}\n"
-            f"<b>Leverage:</b> 1:{acc.leverage}\n"
-            f"<b>Server:</b> {acc.server}"
+            f"<b>Margin:</b> {acc.margin}\n"
+            f"<b>Khả dụng:</b> {acc.free_margin}\n"
+            f"<b>Đòn bẩy:</b> 1:{acc.leverage}\n"
+            f"<b>Server:</b> {acc.server}\n"
+            f"━━━━━━━━━━━━━━━━"
         )
         if update.effective_message:
             await update.effective_message.reply_text(msg, parse_mode=ParseMode.HTML)
 
     async def _format_history_message(self, days: int = 7) -> tuple[str, InlineKeyboardMarkup]:
-        deals = await self.service.get_closed_deals(days=days, limit=15)
-        if not deals:
+        positions = await self.service.get_closed_positions(days=days, limit=15)
+        if not positions:
             msg = (
-                f"📜 <b>Lịch Sử Lệnh Đã Đóng</b>\n"
-                f"⏱️ <i>Kỳ xem: {days} ngày gần nhất</i>\n\n"
-                f"ℹ️ Không có lệnh nào đã đóng trong khoảng thời gian này."
+                f"📜 <b>Lịch Sử Giao Dịch</b>\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"⏱ Kỳ xem: {days} ngày\n\n"
+                f"Không có giao dịch nào trong khoảng thời gian này."
             )
         else:
-            lines = [f"📜 <b>Lịch Sử Lệnh Đã Đóng ({days} ngày qua):</b>\n"]
-            for d in deals:
-                pnl_icon = "🟢" if d.profit > Decimal("0") else ("🔴" if d.profit < Decimal("0") else "⚪")
-                pnl_sign = "+" if d.profit > Decimal("0") else ""
-                net = d.profit + d.swap + d.commission
-                time_str = d.time.strftime("%d/%m %H:%M")
-                lines.append(
-                    f"• {pnl_icon} <b>{d.symbol}</b> {d.deal_type} {d.volume} @ {d.price}\n"
-                    f"  PnL: <b>{pnl_sign}${d.profit:.2f}</b> (Net: ${net:.2f}) | {time_str} | #{d.ticket}"
-                )
-            lines.append(f"\n📊 <i>Hiển thị {len(deals)} lệnh gần nhất.</i>")
-            msg = "\n".join(lines)
+            cards = []
+            for pos in positions:
+                badge_icon = "🔴" if pos.position_type == "SELL" else "🟢"
+                pos_type_title = "Sell" if pos.position_type == "SELL" else "Buy"
+
+                pnl_icon = "🟢" if pos.net_pnl > 0 else ("🔴" if pos.net_pnl < 0 else "⚪")
+                if pos.net_pnl % Decimal("1") == Decimal("0"):
+                    pnl_num_str = f"{pos.net_pnl:+,.0f}"
+                else:
+                    pnl_num_str = f"{pos.net_pnl:+,.2f}"
+                pnl_str = f"{pnl_num_str} {pos.currency}"
+
+                def _fmt_vol(v: Decimal) -> str:
+                    s = f"{v:.2f}".rstrip("0")
+                    if s.endswith("."):
+                        s = s[:-1]
+                    return s if s else "0"
+
+                vol_str = f"{_fmt_vol(pos.volume)}/{_fmt_vol(pos.total_volume)} Lots"
+                if not pos.is_fully_closed:
+                    partial_note = " <i>(Đang giữ vị thế)</i>"
+                elif pos.deals_count > 1:
+                    partial_note = f" <i>({pos.deals_count} lần chốt)</i>"
+                else:
+                    partial_note = ""
+
+                def _format_price_display(val: Decimal | None) -> str:
+                    if val is None:
+                        return "N/A"
+                    min_decimals = 4 if val < Decimal("50") else 2
+                    s = f"{val:,.5f}".rstrip("0")
+                    if s.endswith("."):
+                        s += "0" * min_decimals
+                    else:
+                        dec_len = len(s.split(".")[1])
+                        if dec_len < min_decimals:
+                            s += "0" * (min_decimals - dec_len)
+                    return s
+
+                open_price_str = _format_price_display(pos.open_price)
+                close_price_str = _format_price_display(pos.close_price)
+                close_time_str = format_vietnam_time(pos.close_time, "%d/%m/%Y %H:%M:%S")
+
+                card_lines = [
+                    f"{badge_icon} <b>{pos_type_title} {pos.symbol}</b>  (<code>#{pos.ticket}</code>)",
+                    f"<b>Kết thúc PnL:</b> {pnl_icon} <b>{pnl_str}</b>",
+                    f"<b>Đã đóng/Tổng số lượng:</b> <code>{vol_str}</code>{partial_note}",
+                    f"<b>Giá mở:</b> <code>{open_price_str}</code>",
+                    f"<b>Trung bình Giá đóng:</b> <code>{close_price_str}</code>",
+                    f"<b>Thời gian đóng:</b> <code>{close_time_str}</code>",
+                ]
+
+                # Option 2: Hiển thị chi tiết từng lần đóng nếu có từ 2 lần chốt trở lên
+                if pos.deals_count > 1 and pos.partial_deals:
+                    card_lines.append("<b>Chi tiết các lần đóng:</b>")
+                    for idx, pd in enumerate(pos.partial_deals):
+                        prefix = "  └" if idx == len(pos.partial_deals) - 1 else "  ├"
+                        if pd.profit % Decimal("1") == Decimal("0"):
+                            pd_pnl_str = f"{pd.profit:+,.0f} {pos.currency}"
+                        else:
+                            pd_pnl_str = f"{pd.profit:+,.2f} {pos.currency}"
+                        pd_vol_str = _fmt_vol(pd.volume)
+                        pd_price_str = _format_price_display(pd.price)
+                        card_lines.append(
+                            f"{prefix} <code>{pd_vol_str} lot @ {pd_price_str} ({pd_pnl_str})</code>"
+                        )
+
+                card = "\n".join(card_lines)
+                cards.append(card)
+
+            msg = (
+                f"📜 <b>Lịch Sử Giao Dịch ({days} ngày)</b>\n"
+                f"━━━━━━━━━━━━━━━━\n\n"
+                + "\n\n────────────────\n\n".join(cards)
+                + f"\n\n━━━━━━━━━━━━━━━━\n📊 Hiển thị {len(positions)} vị thế gần nhất."
+            )
 
         keyboard = build_history_keyboard(days)
         return msg, keyboard
@@ -332,21 +411,21 @@ class PersonalTelegramBot:
         pf_str = f"{pf_val:.2f}" if pf_val < 900 else "∞ (Chưa có lệnh thua)"
 
         msg = (
-            f"📈 <b>Báo Cáo Hiệu Suất & Thống Kê Win/Loss</b>\n"
-            f"⏱️ <i>Kỳ thống kê: {days} ngày gần nhất</i>\n"
-            f"────────────────────────\n"
-            f"🎯 <b>Tổng lệnh đã đóng:</b> {stats['total_trades']}\n"
-            f"✅ <b>Lệnh Thắng (Win):</b> {stats['win_trades']} (<b>{stats['win_rate']}%</b>)\n"
-            f"❌ <b>Lệnh Thua (Loss):</b> {stats['loss_trades']}\n"
-            f"⚪ <b>Hòa vốn (BE):</b> {stats['breakeven_trades']}\n"
-            f"────────────────────────\n"
-            f"💵 <b>Tổng Lợi Nhuận:</b> +${stats['total_profit']:.2f}\n"
-            f"💸 <b>Tổng Thua Lỗ:</b> -${abs(stats['total_loss']):.2f}\n"
-            f"⚖️ <b>Profit Factor:</b> <code>{pf_str}</code>\n"
-            f"💰 <b>Lãi Ròng (Net PnL):</b> {pnl_icon} <b>{pnl_sign}${net_pnl:.2f}</b>\n"
-            f"────────────────────────\n"
-            f"🏆 <b>Lệnh thắng lớn nhất:</b> +${stats['best_trade']:.2f}\n"
-            f"💥 <b>Lệnh thua lớn nhất:</b> ${stats['worst_trade']:.2f}"
+            f"📈 <b>Báo Cáo Hiệu Suất</b>\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"⏱ Kỳ thống kê: {days} ngày\n\n"
+            f"<b>Tổng lệnh:</b> {stats['total_trades']}\n"
+            f"✅ Thắng: {stats['win_trades']} (<b>{stats['win_rate']}%</b>)\n"
+            f"❌ Thua: {stats['loss_trades']}\n"
+            f"⚪ Hòa vốn: {stats['breakeven_trades']}\n\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"<b>Tổng lãi:</b> +${stats['total_profit']:.2f}\n"
+            f"<b>Tổng lỗ:</b> -${abs(stats['total_loss']):.2f}\n"
+            f"<b>Profit Factor:</b> <code>{pf_str}</code>\n"
+            f"<b>Lãi ròng:</b> {pnl_icon} <b>{pnl_sign}${net_pnl:.2f}</b>\n\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"<b>Thắng lớn nhất:</b> +${stats['best_trade']:.2f}\n"
+            f"<b>Thua lớn nhất:</b> ${stats['worst_trade']:.2f}"
         )
         keyboard = build_stats_keyboard(days)
         return msg, keyboard
@@ -379,29 +458,47 @@ class PersonalTelegramBot:
     @admin_only
     async def cmd_close(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not context.args:
-            await update.message.reply_text("Usage: <code>/close &lt;ticket&gt;</code>", parse_mode=ParseMode.HTML)
+            await update.message.reply_text(
+                "⚠️ <b>Cú pháp:</b> <code>/close &lt;ticket&gt;</code>\n"
+                "<i>Ví dụ:</i> <code>/close 12345678</code>",
+                parse_mode=ParseMode.HTML,
+            )
             return
 
         try:
             ticket = int(context.args[0])
             res = await self.service.close_position_by_ticket(ticket)
             if res.success:
-                await update.message.reply_text(f"✅ Closed position <code>{ticket}</code> successfully!", parse_mode=ParseMode.HTML)
+                await update.message.reply_text(
+                    f"✅ <b>Đã Đóng Vị Thế</b>\n"
+                    f"━━━━━━━━━━━━━━━━\n"
+                    f"• Ticket: <code>{ticket}</code>\n"
+                    f"• Kết quả: Thành công",
+                    parse_mode=ParseMode.HTML,
+                )
             else:
-                await update.message.reply_text(f"❌ Failed to close <code>{ticket}</code>: {res.comment}", parse_mode=ParseMode.HTML)
+                await update.message.reply_text(
+                    f"❌ <b>Đóng Vị Thế Thất Bại</b>\n"
+                    f"━━━━━━━━━━━━━━━━\n"
+                    f"• Ticket: <code>{ticket}</code>\n"
+                    f"• Lý do: {res.comment}",
+                    parse_mode=ParseMode.HTML,
+                )
         except ValueError:
-            await update.message.reply_text("❌ Ticket must be an integer.")
+            await update.message.reply_text("❌ Ticket phải là số nguyên.")
 
     @admin_only
     async def cmd_closeall(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         results = await self.service.close_all_positions()
         if not results:
-            await update.message.reply_text("No positions were open.")
+            await update.message.reply_text("📂 <b>Không có vị thế nào đang mở.</b>", parse_mode=ParseMode.HTML)
             return
 
         successes = sum(1 for r in results if r.success)
         await update.message.reply_text(
-            f"🚨 <b>Close All Completed</b>\nClosed {successes}/{len(results)} positions.",
+            f"🚨 <b>Đã Đóng Toàn Bộ Vị Thế</b>\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"• Đã đóng thành công: <b>{successes}/{len(results)}</b> vị thế",
             parse_mode=ParseMode.HTML,
         )
 
@@ -410,7 +507,8 @@ class PersonalTelegramBot:
         args = context.args or []
         if len(args) < 2:
             await update.message.reply_text(
-                "Usage: <code>/partial &lt;ticket&gt; &lt;percent&gt;</code>\nExample: <code>/partial 123456 50</code>",
+                "⚠️ <b>Cú pháp:</b> <code>/partial &lt;ticket&gt; &lt;phần_trăm&gt;</code>\n"
+                "<i>Ví dụ:</i> <code>/partial 123456 50</code> (chốt 50%)",
                 parse_mode=ParseMode.HTML,
             )
             return
@@ -421,7 +519,7 @@ class PersonalTelegramBot:
             positions = await self.service.broker.get_positions()
             target = next((p for p in positions if p.ticket == ticket), None)
             if not target:
-                await update.message.reply_text(f"❌ Position {ticket} not found.")
+                await update.message.reply_text(f"❌ Không tìm thấy vị thế <code>{ticket}</code>.", parse_mode=ParseMode.HTML)
                 return
 
             vol = (target.volume * (percent / Decimal("100"))).quantize(Decimal("0.01"))
@@ -429,81 +527,162 @@ class PersonalTelegramBot:
 
             res = await self.service.close_position_by_ticket(ticket, volume=vol)
             if res.success:
-                await update.message.reply_text(f"✅ Partial closed {vol} lot on ticket <code>{ticket}</code>!", parse_mode=ParseMode.HTML)
+                rem_vol = target.volume - vol
+                await update.message.reply_text(
+                    f"✅ <b>Chốt Lời Một Phần Thành Công</b>\n"
+                    f"━━━━━━━━━━━━━━━━\n"
+                    f"• Ticket: <code>{ticket}</code> ({target.symbol})\n"
+                    f"• Đã đóng: <b>{vol} lot</b> ({percent}%)\n"
+                    f"• Còn lại: <b>{rem_vol} lot</b>",
+                    parse_mode=ParseMode.HTML,
+                )
             else:
-                await update.message.reply_text(f"❌ Failed: {res.comment}")
+                await update.message.reply_text(
+                    f"❌ <b>Chốt Lời Thất Bại</b>\n"
+                    f"━━━━━━━━━━━━━━━━\n"
+                    f"• Ticket: <code>{ticket}</code>\n"
+                    f"• Lý do: {res.comment}",
+                    parse_mode=ParseMode.HTML,
+                )
         except Exception as e:
-            await update.message.reply_text(f"❌ Error: {e}")
+            await update.message.reply_text(f"❌ Lỗi: <code>{e}</code>", parse_mode=ParseMode.HTML)
 
     @admin_only
     async def cmd_setsl(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         args = context.args or []
         if len(args) < 2:
-            await update.message.reply_text("Usage: <code>/setsl &lt;ticket&gt; &lt;price&gt;</code>", parse_mode=ParseMode.HTML)
+            await update.message.reply_text(
+                "⚠️ <b>Cú pháp:</b> <code>/setsl &lt;ticket&gt; &lt;giá&gt;</code>\n"
+                "<i>Ví dụ:</i> <code>/setsl 123456 2650.5</code>",
+                parse_mode=ParseMode.HTML,
+            )
             return
         try:
             ticket = int(args[0])
             price = Decimal(args[1])
             res = await self.service.modify_sl_tp(ticket, sl=price)
             if res.success:
-                await update.message.reply_text(f"✅ Stop Loss on <code>{ticket}</code> set to {price}!", parse_mode=ParseMode.HTML)
+                await update.message.reply_text(
+                    f"✅ <b>Đã Cập Nhật Stop Loss</b>\n"
+                    f"━━━━━━━━━━━━━━━━\n"
+                    f"• Ticket: <code>{ticket}</code>\n"
+                    f"• SL mới: <code>{price}</code>",
+                    parse_mode=ParseMode.HTML,
+                )
             else:
-                await update.message.reply_text(f"❌ Failed: {res.comment}")
+                await update.message.reply_text(
+                    f"❌ <b>Cập Nhật SL Thất Bại</b>\n"
+                    f"━━━━━━━━━━━━━━━━\n"
+                    f"• Ticket: <code>{ticket}</code>\n"
+                    f"• Lý do: {res.comment}",
+                    parse_mode=ParseMode.HTML,
+                )
         except Exception as e:
-            await update.message.reply_text(f"❌ Error: {e}")
+            await update.message.reply_text(f"❌ Lỗi: <code>{e}</code>", parse_mode=ParseMode.HTML)
 
     @admin_only
     async def cmd_settp(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         args = context.args or []
         if len(args) < 2:
-            await update.message.reply_text("Usage: <code>/settp &lt;ticket&gt; &lt;price&gt;</code>", parse_mode=ParseMode.HTML)
+            await update.message.reply_text(
+                "⚠️ <b>Cú pháp:</b> <code>/settp &lt;ticket&gt; &lt;giá&gt;</code>\n"
+                "<i>Ví dụ:</i> <code>/settp 123456 2680.0</code>",
+                parse_mode=ParseMode.HTML,
+            )
             return
         try:
             ticket = int(args[0])
             price = Decimal(args[1])
             res = await self.service.modify_sl_tp(ticket, tp=price)
             if res.success:
-                await update.message.reply_text(f"✅ Take Profit on <code>{ticket}</code> set to {price}!", parse_mode=ParseMode.HTML)
+                await update.message.reply_text(
+                    f"✅ <b>Đã Cập Nhật Take Profit</b>\n"
+                    f"━━━━━━━━━━━━━━━━\n"
+                    f"• Ticket: <code>{ticket}</code>\n"
+                    f"• TP mới: <code>{price}</code>",
+                    parse_mode=ParseMode.HTML,
+                )
             else:
-                await update.message.reply_text(f"❌ Failed: {res.comment}")
+                await update.message.reply_text(
+                    f"❌ <b>Cập Nhật TP Thất Bại</b>\n"
+                    f"━━━━━━━━━━━━━━━━\n"
+                    f"• Ticket: <code>{ticket}</code>\n"
+                    f"• Lý do: {res.comment}",
+                    parse_mode=ParseMode.HTML,
+                )
         except Exception as e:
-            await update.message.reply_text(f"❌ Error: {e}")
+            await update.message.reply_text(f"❌ Lỗi: <code>{e}</code>", parse_mode=ParseMode.HTML)
 
     @admin_only
     async def cmd_breakeven(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not context.args:
-            await update.message.reply_text("Usage: <code>/breakeven &lt;ticket&gt;</code>", parse_mode=ParseMode.HTML)
+            await update.message.reply_text(
+                "⚠️ <b>Cú pháp:</b> <code>/breakeven &lt;ticket&gt;</code>\n"
+                "<i>Ví dụ:</i> <code>/breakeven 123456</code>",
+                parse_mode=ParseMode.HTML,
+            )
             return
         try:
             ticket = int(context.args[0])
             res = await self.service.move_to_breakeven(ticket)
             if res.success:
-                await update.message.reply_text(f"🎯 Moved SL on <code>{ticket}</code> to Entry price!", parse_mode=ParseMode.HTML)
+                await update.message.reply_text(
+                    f"🎯 <b>Đã Dời SL Về Hòa Vốn (Entry)</b>\n"
+                    f"━━━━━━━━━━━━━━━━\n"
+                    f"• Ticket: <code>{ticket}</code>",
+                    parse_mode=ParseMode.HTML,
+                )
             else:
-                await update.message.reply_text(f"❌ Failed: {res.comment}")
+                await update.message.reply_text(
+                    f"❌ <b>Dời SL Thất Bại</b>\n"
+                    f"━━━━━━━━━━━━━━━━\n"
+                    f"• Ticket: <code>{ticket}</code>\n"
+                    f"• Lý do: {res.comment}",
+                    parse_mode=ParseMode.HTML,
+                )
         except Exception as e:
-            await update.message.reply_text(f"❌ Error: {e}")
+            await update.message.reply_text(f"❌ Lỗi: <code>{e}</code>", parse_mode=ParseMode.HTML)
 
     @admin_only
     async def cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self.service.update_config_key("enabled", False, updated_by="PAUSE")
-        await update.message.reply_text("⏸️ <b>Bot PAUSED.</b> Signal execution is suspended.", parse_mode=ParseMode.HTML)
+        now_vn = now_vietnam().strftime("%H:%M:%S %d/%m/%Y")
+        await update.message.reply_text(
+            f"⏸️ <b>Đã Tạm Dừng Bot</b>\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"• Trạng thái: <b>TẠM DỪNG (Paused)</b>\n"
+            f"• Bot sẽ không vào lệnh mới từ tín hiệu.\n"
+            f"⏱ {now_vn}",
+            parse_mode=ParseMode.HTML,
+        )
 
     @admin_only
     async def cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self.service.update_config_key("enabled", True, updated_by="RESUME")
-        await update.message.reply_text("▶️ <b>Bot RESUMED.</b> Normal signal processing active.", parse_mode=ParseMode.HTML)
+        now_vn = now_vietnam().strftime("%H:%M:%S %d/%m/%Y")
+        await update.message.reply_text(
+            f"▶️ <b>Đã Kích Hoạt Lại Bot</b>\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"• Trạng thái: <b>HOẠT ĐỘNG (Active)</b>\n"
+            f"• Bot sẵn sàng nhận và xử lý tín hiệu mới.\n"
+            f"⏱ {now_vn}",
+            parse_mode=ParseMode.HTML,
+        )
 
     @admin_only
     async def cmd_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         connected = await self.service.broker.is_connected()
-        status_broker = "✅ OK" if connected else "❌ Disconnected"
+        status_broker = "✅ Hoạt động bình thường" if connected else "❌ Mất kết nối"
+        now_vn = now_vietnam().strftime("%H:%M:%S %d/%m/%Y")
         msg = (
-            "🏥 <b>Health Status:</b>\n\n"
-            f"• <b>MT5 Connection:</b> {status_broker}\n"
-            f"• <b>Signal Listener:</b> ✅ Ready\n"
-            f"• <b>Risk Engine:</b> ✅ Active\n"
-            f"• <b>Allowed Symbols:</b> {', '.join(self.service.risk_config.allowed_symbols)}"
+            f"🏥 <b>Kiểm Tra Sức Khỏe Hệ Thống</b>\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"⏱ {now_vn}\n\n"
+            f"• Kết nối MT5: {status_broker}\n"
+            f"• Nhận tín hiệu (Listener): ✅ Sẵn sàng\n"
+            f"• Quản lý rủi ro: ✅ Đang chạy\n"
+            f"• Cặp giao dịch: <code>{', '.join(self.service.risk_config.allowed_symbols)}</code>\n"
+            f"━━━━━━━━━━━━━━━━"
         )
         await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
 
@@ -511,12 +690,102 @@ class PersonalTelegramBot:
     async def cmd_kill(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self.service.update_config_key("enabled", False, updated_by="KILL_SWITCH")
         results = await self.service.close_all_positions()
+        now_vn = now_vietnam().strftime("%H:%M:%S %d/%m/%Y")
         await update.message.reply_text(
-            f"🚨 <b>EMERGENCY KILL SWITCH ACTIVATED</b>\n"
-            f"• Bot disabled (saved to DB).\n"
-            f"• Closed {len(results)} active positions.",
+            f"🚨 <b>KÍCH HOẠT DỪNG KHẨN CẤP (KILL SWITCH)</b>\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"• Trạng thái Bot: <b>ĐÃ TẮT</b> (Đã lưu DB)\n"
+            f"• Đã đóng: <b>{len(results)}</b> vị thế đang mở\n"
+            f"⏱ {now_vn}",
             parse_mode=ParseMode.HTML,
         )
+
+    @staticmethod
+    def _extract_config_pairs(raw_text: str, args: list[str]) -> list[tuple[str, str]]:
+        """
+        Extract (key, value) pairs from single-line or multi-line command texts.
+        Supports:
+          - /config set key val
+          - /config set key=val
+          - /config key val
+          - /config key=val
+          - Multiple lines of above (e.g. batch pasting /config set ...)
+          - Multiple /config commands on one line
+          - Multiple key=val or alternating key val pairs on one line
+        """
+        pairs: list[tuple[str, str]] = []
+        raw_lines = [l.strip() for l in raw_text.splitlines() if l.strip()]
+
+        if len(raw_lines) > 1:
+            for line in raw_lines:
+                clean = re.sub(r"^/?config\s*", "", line, flags=re.IGNORECASE).strip()
+                if clean.lower().startswith("set"):
+                    clean = clean[3:].strip()
+                if not clean:
+                    continue
+                if "=" in clean:
+                    k, v = clean.split("=", 1)
+                    pairs.append((k.strip().lower(), v.strip()))
+                elif ":" in clean:
+                    k, v = clean.split(":", 1)
+                    pairs.append((k.strip().lower(), v.strip()))
+                else:
+                    parts = clean.split(None, 1)
+                    if len(parts) == 2:
+                        pairs.append((parts[0].strip().lower(), parts[1].strip()))
+            return pairs
+
+        # Single line: check if multiple /config commands appear on the same line
+        if len(re.findall(r"/(?:config\b)", raw_text, flags=re.IGNORECASE)) > 1:
+            chunks = [c.strip() for c in re.split(r"(?=/(?:config\b))", raw_text) if c.strip()]
+            for chunk in chunks:
+                clean = re.sub(r"^/?config\s*", "", chunk, flags=re.IGNORECASE).strip()
+                if clean.lower().startswith("set"):
+                    clean = clean[3:].strip()
+                if not clean:
+                    continue
+                if "=" in clean:
+                    k, v = clean.split("=", 1)
+                    pairs.append((k.strip().lower(), v.strip()))
+                elif ":" in clean:
+                    k, v = clean.split(":", 1)
+                    pairs.append((k.strip().lower(), v.strip()))
+                else:
+                    parts = clean.split(None, 1)
+                    if len(parts) == 2:
+                        pairs.append((parts[0].strip().lower(), parts[1].strip()))
+            return pairs
+
+        # Standard args processing for single-line command
+        remaining = args[1:] if (args and args[0].lower() == "set") else args
+        if not remaining:
+            return pairs
+
+        if all("=" in token for token in remaining):
+            for token in remaining:
+                k, v = token.split("=", 1)
+                pairs.append((k.strip().lower(), v.strip()))
+            return pairs
+
+        from app.trading.risk.models import RiskConfig
+        valid_keys = set(RiskConfig.model_fields.keys())
+
+        if len(remaining) >= 4 and len(remaining) % 2 == 0:
+            keys_candidates = [remaining[i].lower() for i in range(0, len(remaining), 2)]
+            if all(k in valid_keys for k in keys_candidates):
+                for i in range(0, len(remaining), 2):
+                    pairs.append((remaining[i].lower(), remaining[i + 1].strip()))
+                return pairs
+
+        if len(remaining) == 1 and "=" in remaining[0]:
+            k, v = remaining[0].split("=", 1)
+            pairs.append((k.strip().lower(), v.strip()))
+        elif len(remaining) >= 2:
+            k = remaining[0].strip()
+            v = " ".join(remaining[1:]).strip()
+            pairs.append((k.lower(), v))
+
+        return pairs
 
     @admin_only
     async def cmd_config(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -528,46 +797,44 @@ class PersonalTelegramBot:
             args = list(context.args or [])
             cfg = self.service.risk_config
             user_id = update.effective_user.id if update.effective_user else 0
-            logger.info("cmd_config_received", args=args, user_id=user_id)
+            raw_text = (target.text or "").strip()
+            logger.info("cmd_config_received", args=args, user_id=user_id, raw_text=raw_text)
 
             if args and args[0].lower() == "reload":
                 await self.service.load_risk_config_from_db()
                 await target.reply_text("🔄 Đã tải lại toàn bộ cấu hình từ database!", parse_mode=ParseMode.HTML)
                 return
 
-            # Support formats:
-            # 1. /config set key val
-            # 2. /config set key=val
-            # 3. /config key val
-            # 4. /config key=val
-            key: str | None = None
-            val: str | None = None
+            pairs = self._extract_config_pairs(raw_text, args)
 
-            remaining = args[1:] if (args and args[0].lower() == "set") else args
+            if pairs:
+                updates_dict = {k.lower(): v for k, v in pairs}
+                results = await self.service.update_config_keys(updates_dict, updated_by="ADMIN")
 
-            if len(remaining) == 1 and "=" in remaining[0]:
-                parts = remaining[0].split("=", 1)
-                key, val = parts[0].strip(), parts[1].strip()
-            elif len(remaining) >= 2:
-                key = remaining[0].strip()
-                val = " ".join(remaining[1:]).strip()
+                success_lines = []
+                failed_lines = []
+                for k, ok in results.items():
+                    if ok:
+                        val = getattr(cfg, k, updates_dict[k])
+                        success_lines.append(f"• <code>{k}</code> = <b>{val}</b>")
+                    else:
+                        failed_lines.append(f"• <code>{k}</code>: Không tìm thấy thuộc tính hoặc giá trị sai")
 
-            if key and val:
-                key_clean = key.lower()
-                if await self.service.update_config_key(key_clean, val, updated_by="ADMIN"):
-                    current_val = getattr(cfg, key_clean, val)
-                    await target.reply_text(
-                        f"✅ <b>Đã cập nhật cấu hình vào DB:</b>\n"
-                        f"• <code>{key_clean}</code> = <b>{current_val}</b>",
-                        parse_mode=ParseMode.HTML,
+                response_parts = []
+                if success_lines:
+                    count_str = f" {len(success_lines)}" if len(success_lines) > 1 else ""
+                    response_parts.append(
+                        f"✅ <b>Đã cập nhật{count_str} cấu hình vào DB:</b>\n" + "\n".join(success_lines)
                     )
-                else:
-                    await target.reply_text(
-                        f"❌ <b>Không tìm thấy thuộc tính cấu hình:</b> <code>{key_clean}</code>\n"
-                        f"<i>Gõ <code>/config</code> để xem danh sách các tham số hợp lệ.</i>",
-                        parse_mode=ParseMode.HTML,
+                if failed_lines:
+                    response_parts.append(
+                        f"❌ <b>Cấu hình không hợp lệ:</b>\n" + "\n".join(failed_lines) +
+                        "\n<i>Gõ <code>/config</code> để xem danh sách tham số chuẩn.</i>"
                     )
-                return
+
+                if response_parts:
+                    await target.reply_text("\n\n".join(response_parts), parse_mode=ParseMode.HTML)
+                    return
 
             syms_str = ", ".join(cfg.allowed_symbols)
             msg = (
@@ -590,10 +857,13 @@ class PersonalTelegramBot:
                 "<b>3. ✂️ Quản lý vị thế & Chốt lời (Position Management):</b>\n"
                 f"• Chốt lời 1 phần: <b>{cfg.default_partial_close_percent}%</b> ➔ <code>/config set default_partial_close_percent {cfg.default_partial_close_percent}</code>\n"
                 f"• Tự dời SL về Entry: <b>{cfg.auto_breakeven_on_partial}</b> ➔ <code>/config set auto_breakeven_on_partial {str(not cfg.auto_breakeven_on_partial).lower()}</code>\n"
-                f"• Bù giá dời SL (Offset): <b>{cfg.breakeven_offset_price}</b> ➔ <code>/config set breakeven_offset_price 0.0</code>\n\n"
-                "<b>4. ⏳ Cặp tiền & Hạn tín hiệu (Symbols & Timing):</b>\n"
+                f"• Bù giá dời SL (Offset): <b>{cfg.breakeven_offset_price}</b> ➔ <code>/config set breakeven_offset_price 0.0</code>\n"
+                f"• Cho phép chốt nhiều lần: <b>{cfg.allow_multiple_partial_closes}</b> ➔ <code>/config set allow_multiple_partial_closes {str(not cfg.allow_multiple_partial_closes).lower()}</code>\n\n"
+                "<b>4. ⏳ Cặp tiền, Thời gian & Hạn tín hiệu (Timing & Symbols):</b>\n"
                 f"• Cặp cho phép: <b>{syms_str}</b>\n"
                 f"  ➔ <code>/config set allowed_symbols {syms_str}</code>\n"
+                f"• Lệch giờ sàn (Broker Offset): <b>UTC+{cfg.broker_utc_offset_hours}</b> (Giờ VN: GMT+7)\n"
+                f"  ➔ <code>/config set broker_utc_offset_hours {cfg.broker_utc_offset_hours}</code>\n"
                 f"• Hạn tín hiệu (Expire): <b>{cfg.signal_expire_seconds}s</b> ➔ <code>/config set signal_expire_seconds 300</code>\n"
                 f"• Lọc trùng (Dedup): <b>{cfg.duplicate_timeout_seconds}s</b> ➔ <code>/config set duplicate_timeout_seconds 10</code>\n\n"
                 "🔄 <i>Nạp lại từ DB:</i> <code>/config reload</code>\n"
@@ -617,15 +887,16 @@ class PersonalTelegramBot:
             if args and args[0].lower() == "reload":
                 count = await self.service.load_management_rules_from_db()
                 await target.reply_text(
-                    f"🔄 Đã tải lại <b>{count}</b> quy tắc từ PostgreSQL vào hệ thống!",
+                    f"🔄 <b>Đã tải lại {count} quy tắc từ cơ sở dữ liệu!</b>",
                     parse_mode=ParseMode.HTML,
                 )
                 return
 
             rules = self.service.get_management_rules()
             lines = [
-                "📖 <b>Từ khóa quản lý lệnh (Vietnamese Rules):</b>\n",
-                "<i>Bot nhận diện các từ khóa này trong tin nhắn Telegram để thực thi quản lý vị thế:</i>\n",
+                "📖 <b>Danh Sách Từ Khóa Quản Lý Lệnh</b>\n"
+                "━━━━━━━━━━━━━━━━\n"
+                "<i>Bot tự động nhận diện các từ khóa này trong tin nhắn Telegram:</i>\n"
             ]
 
             for r in rules:
@@ -639,15 +910,16 @@ class PersonalTelegramBot:
                 lines.append(f"• <code>{r.keyword}</code> ➔ <b>{action_name}</b> {param_str}")
 
             lines.extend([
-                "\n💡 <b>Lệnh tinh chỉnh trực tiếp:</b>",
-                "• Thêm/sửa: <code>/rule add &lt;từ khóa&gt; &lt;ACTION&gt; [params]</code>",
-                "  <i>VD:</i> <code>/rule add \"cắt bớt\" PARTIAL_CLOSE 50</code>",
-                "  <i>VD:</i> <code>/rule add \"về hòa\" BREAKEVEN</code>",
-                "  <i>VD:</i> <code>/rule add \"chốt sạch\" CLOSE</code>",
-                "• Xóa từ khóa: <code>/rule del &lt;từ khóa&gt;</code>",
-                "  <i>VD:</i> <code>/rule del \"chốt sạch\"</code>",
-                "• Nạp lại từ DB: <code>/rules reload</code>",
-                "\n<i>Hỗ trợ các ACTION: PARTIAL_CLOSE, CLOSE, MOVE_SL, BREAKEVEN, REENTRY</i>",
+                "\n━━━━━━━━━━━━━━━━\n"
+                "💡 <b>Lệnh thao tác:</b>\n"
+                "• Thêm/sửa: <code>/rule add &lt;từ khóa&gt; &lt;ACTION&gt; [params]</code>\n"
+                "  <i>VD:</i> <code>/rule add \"cắt bớt\" PARTIAL_CLOSE 50</code>\n"
+                "  <i>VD:</i> <code>/rule add \"về hòa\" BREAKEVEN</code>\n"
+                "  <i>VD:</i> <code>/rule add \"chốt sạch\" CLOSE</code>\n"
+                "• Xóa: <code>/rule del &lt;từ khóa&gt;</code>\n"
+                "  <i>VD:</i> <code>/rule del \"chốt sạch\"</code>\n"
+                "• Nạp lại: <code>/rules reload</code>\n\n"
+                "<i>Hỗ trợ ACTION: PARTIAL_CLOSE, CLOSE, MOVE_SL, BREAKEVEN, REENTRY</i>"
             ])
 
             await target.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
@@ -667,9 +939,10 @@ class PersonalTelegramBot:
 
         if len(tokens) < 2:
             await update.message.reply_text(
-                "Usage:\n"
-                "• <code>/rule add &lt;từ khóa&gt; &lt;ACTION&gt; [params]</code>\n"
-                "• <code>/rule del &lt;từ khóa&gt;</code>\n\n"
+                "⚠️ <b>Cú pháp quản lý từ khóa:</b>\n"
+                "━━━━━━━━━━━━━━━━\n"
+                "• Thêm: <code>/rule add &lt;từ khóa&gt; &lt;ACTION&gt; [params]</code>\n"
+                "• Xóa: <code>/rule del &lt;từ khóa&gt;</code>\n\n"
                 "<i>Xem danh sách: /rules</i>",
                 parse_mode=ParseMode.HTML,
             )
@@ -680,9 +953,9 @@ class PersonalTelegramBot:
         if subcmd == "add":
             if len(tokens) < 4:
                 await update.message.reply_text(
-                    "❌ Cú pháp: <code>/rule add &lt;keyword&gt; &lt;ACTION&gt; [params]</code>\n"
-                    "VD: <code>/rule add \"chốt 1/2\" PARTIAL_CLOSE 50</code>\n"
-                    "ACTIONS: PARTIAL_CLOSE, CLOSE, MOVE_SL, BREAKEVEN, REENTRY",
+                    "❌ <b>Thiếu tham số:</b> <code>/rule add &lt;từ khóa&gt; &lt;ACTION&gt; [params]</code>\n"
+                    "<i>Ví dụ:</i> <code>/rule add \"chốt 1/2\" PARTIAL_CLOSE 50</code>\n"
+                    "<i>ACTIONS:</i> PARTIAL_CLOSE, CLOSE, MOVE_SL, BREAKEVEN, REENTRY",
                     parse_mode=ParseMode.HTML,
                 )
                 return
@@ -708,38 +981,48 @@ class PersonalTelegramBot:
 
             if ok:
                 await update.message.reply_text(
-                    f"✅ Đã lưu từ khóa quản lý lệnh:\n"
+                    f"✅ <b>Đã Lưu Từ Khóa Quản Lý Lệnh</b>\n"
+                    f"━━━━━━━━━━━━━━━━\n"
                     f"• Từ khóa: <code>{keyword}</code>\n"
                     f"• Hành động: <b>{action_type_str}</b>\n"
                     f"• Tham số: {percentage or target or 'Mặc định'}\n\n"
-                    f"<i>Đã cập nhật hệ thống và lưu trữ vào PostgreSQL.</i>",
+                    f"<i>Đã cập nhật hệ thống và lưu trữ vào database.</i>",
                     parse_mode=ParseMode.HTML,
                 )
             else:
                 await update.message.reply_text(
-                    f"❌ Lỗi: Action '<code>{action_type_str}</code>' không hợp lệ.\n"
-                    f"Các action được hỗ trợ: PARTIAL_CLOSE, CLOSE, MOVE_SL, BREAKEVEN, REENTRY",
+                    f"❌ <b>Hành động không hợp lệ:</b> <code>{action_type_str}</code>\n"
+                    f"Hỗ trợ: PARTIAL_CLOSE, CLOSE, MOVE_SL, BREAKEVEN, REENTRY",
                     parse_mode=ParseMode.HTML,
                 )
 
         elif subcmd in ("del", "delete", "remove"):
             if len(tokens) < 3:
-                await update.message.reply_text("❌ Thiếu từ khóa cần xóa. VD: <code>/rule del \"chốt\"</code>", parse_mode=ParseMode.HTML)
+                await update.message.reply_text(
+                    "❌ <b>Thiếu từ khóa cần xóa:</b> <code>/rule del &lt;từ khóa&gt;</code>\n"
+                    "<i>Ví dụ:</i> <code>/rule del \"chốt sạch\"</code>",
+                    parse_mode=ParseMode.HTML,
+                )
                 return
             keyword = tokens[2]
             ok = await self.service.remove_management_rule(keyword)
             if ok:
                 await update.message.reply_text(
-                    f"🗑️ Đã xóa từ khóa <code>{keyword}</code> khỏi hệ thống và database.",
+                    f"🗑 <b>Đã Xóa Từ Khóa</b>\n"
+                    f"━━━━━━━━━━━━━━━━\n"
+                    f"• Từ khóa: <code>{keyword}</code> đã được xóa khỏi hệ thống.",
                     parse_mode=ParseMode.HTML,
                 )
             else:
                 await update.message.reply_text(
-                    f"⚠️ Không tìm thấy từ khóa <code>{keyword}</code> trong danh sách đang hoạt động.",
+                    f"⚠️ Không tìm thấy từ khóa <code>{keyword}</code> trong hệ thống.",
                     parse_mode=ParseMode.HTML,
                 )
         else:
-            await update.message.reply_text("❌ Lệnh phụ không hợp lệ. Dùng <code>add</code> hoặc <code>del</code>.", parse_mode=ParseMode.HTML)
+            await update.message.reply_text(
+                "❌ Lệnh không hợp lệ. Vui lòng dùng <code>add</code> hoặc <code>del</code>.",
+                parse_mode=ParseMode.HTML,
+            )
 
     @admin_only
     async def handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -752,6 +1035,15 @@ class PersonalTelegramBot:
         link = extract_telegram_link(msg.text)
         if link:
             await self._execute_replay_link(update, context, link)
+            return
+
+        raw = msg.text.strip().lower()
+        if raw.startswith("/config") or raw.startswith("config") or any(
+            line.strip().startswith("/config") or line.strip().startswith("config")
+            for line in msg.text.splitlines()
+        ):
+            await self.cmd_config(update, context)
+            return
 
     @admin_only
     async def cmd_replay(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -769,11 +1061,12 @@ class PersonalTelegramBot:
 
         if not link:
             await msg.reply_text(
-                "ℹ️ <b>Hướng dẫn nạp lại tín hiệu (Signal Replay):</b>\n\n"
+                "ℹ️ <b>Hướng Dẫn Nạp Lại Tín Hiệu (Replay)</b>\n"
+                "━━━━━━━━━━━━━━━━\n"
                 "Gửi link tin nhắn chứa tín hiệu từ kênh Telegram:\n"
                 "• Cú pháp: <code>/replay &lt;link_tin_nhắn&gt;</code>\n"
                 "  <i>VD:</i> <code>/replay https://t.me/MegaLodonGOLDForex/1241</code>\n\n"
-                "• Hoặc dán trực tiếp link vào bot chat này mà không cần gõ lệnh.\n"
+                "• Hoặc dán trực tiếp link vào chat này mà không cần gõ lệnh.\n"
                 "<i>Hỗ trợ cả kênh công khai (@slug) và kênh riêng tư (/c/channel_id).</i>",
                 parse_mode=ParseMode.HTML,
             )
@@ -790,22 +1083,26 @@ class PersonalTelegramBot:
             return
 
         status_msg = await msg.reply_text(
-            f"⏳ <b>Đang tải tin nhắn từ Telegram...</b>\n• Link: <code>{link}</code>",
+            f"⏳ <b>Đang tải tin nhắn từ Telegram...</b>\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"• Link: <code>{link}</code>",
             parse_mode=ParseMode.HTML,
         )
 
         try:
             from app.telegram.signal_listener import signal_listener
-            raw_text, msg_id, chat_id, canonical_link, is_reentry = (
-                await signal_listener.fetch_message_by_link(link)
-            )
+            fetch_res = await signal_listener.fetch_message_by_link(link)
+            raw_text, msg_id, chat_id, canonical_link, is_reentry = fetch_res[:5]
+            reply_to_msg_id = fetch_res[5] if len(fetch_res) > 5 else None
 
             preview_text = raw_text[:400] + ("..." if len(raw_text) > 400 else "")
+            reply_info = f"\n• <b>Reply to:</b> <code>#{reply_to_msg_id}</code>" if reply_to_msg_id else ""
             await status_msg.edit_text(
-                f"📥 <b>Đã tải tin nhắn thành công! Đang xử lý tín hiệu...</b>\n"
+                f"📥 <b>Đã Tải Tin Nhắn! Đang xử lý...</b>\n"
+                f"━━━━━━━━━━━━━━━━\n"
                 f"• <b>Kênh / Chat ID:</b> <code>{chat_id}</code>\n"
-                f"• <b>Message ID:</b> <code>#{msg_id}</code>\n"
-                f"• <b>Nội dung tin nhắn:</b>\n<pre>{preview_text}</pre>",
+                f"• <b>Message ID:</b> <code>#{msg_id}</code>{reply_info}\n\n"
+                f"<b>Nội dung:</b>\n<pre>{preview_text}</pre>",
                 parse_mode=ParseMode.HTML,
             )
 
@@ -816,6 +1113,7 @@ class PersonalTelegramBot:
                 message_id=msg_id,
                 chat_id=chat_id,
                 message_link=canonical_link,
+                reply_to_msg_id=reply_to_msg_id,
             )
         except Exception as e:
             logger.error("replay_signal_failed", link=link, error=str(e), exc_info=True)
@@ -926,36 +1224,39 @@ class PersonalTelegramBot:
             ticket_str = data.split("_")[1]
             if ticket_str == "all":
                 await self.service.close_all_positions()
-                await query.edit_message_text("🚨 All positions closed.")
+                await query.edit_message_text("🚨 <b>Đã đóng toàn bộ vị thế.</b>", parse_mode=ParseMode.HTML)
             else:
                 try:
                     ticket = int(ticket_str)
                     res = await self.service.close_position_by_ticket(ticket)
                     if res.success:
-                        await query.edit_message_text(f"✅ Closed ticket {ticket}.")
+                        await query.edit_message_text(f"✅ Đã đóng vị thế <code>{ticket}</code>.", parse_mode=ParseMode.HTML)
                     else:
-                        await query.edit_message_text(f"❌ Failed to close {ticket}: {res.comment}")
+                        await query.edit_message_text(f"❌ Không thể đóng vị thế <code>{ticket}</code>: {res.comment}", parse_mode=ParseMode.HTML)
                 except ValueError:
                     pass
         elif data.startswith("be_"):
             ticket = int(data.split("_")[1])
             res = await self.service.move_to_breakeven(ticket)
             if res.success:
-                await query.edit_message_text(f"🎯 Moved SL on ticket {ticket} to Entry!")
+                await query.edit_message_text(f"🎯 Đã dời SL vị thế <code>{ticket}</code> về Entry!", parse_mode=ParseMode.HTML)
             else:
-                await query.edit_message_text(f"❌ Failed to move SL: {res.comment}")
+                await query.edit_message_text(f"❌ Không thể dời SL: {res.comment}", parse_mode=ParseMode.HTML)
         elif data in ("view_positions", "positions_refresh"):
             positions = await self.service.broker.get_positions()
             if not positions:
                 keyboard = build_status_keyboard(cfg.enabled)
-                await query.edit_message_text("📂 <b>No open positions.</b>", parse_mode=ParseMode.HTML, reply_markup=keyboard)
+                await query.edit_message_text("📂 <b>Không có vị thế đang mở.</b>", parse_mode=ParseMode.HTML, reply_markup=keyboard)
             else:
-                lines = ["📂 <b>Active Positions:</b>\n"]
+                lines = ["📂 <b>Vị Thế Đang Mở</b>\n━━━━━━━━━━━━━━━━\n"]
                 for p in positions:
                     pnl_icon = "🟢" if p.profit >= Decimal("0") else "🔴"
+                    open_time_str = format_vietnam_time(p.open_time, "%H:%M %d/%m")
                     lines.append(
-                        f"• Ticket <code>{p.ticket}</code>: {p.position_type} {p.volume} <b>{p.symbol}</b> @ {p.open_price}\n"
-                        f"  Curr: {p.current_price} | PnL: {pnl_icon} <b>${p.profit:.2f}</b> | SL: {p.sl or 'None'} | TP: {p.tp or 'None'}"
+                        f"{pnl_icon} <b>{p.symbol}</b> {p.position_type} {p.volume} lot\n"
+                        f"  Entry: <code>{p.open_price}</code> → Hiện tại: <code>{p.current_price}</code>\n"
+                        f"  PnL: <b>${p.profit:.2f}</b> | SL: {p.sl or '—'} | TP: {p.tp or '—'}\n"
+                        f"  Ticket: <code>{p.ticket}</code> | Mở: {open_time_str}"
                     )
                 keyboard = build_positions_keyboard(positions)
                 await query.edit_message_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=keyboard)
@@ -964,13 +1265,13 @@ class PersonalTelegramBot:
             orders = await self.service.broker.get_pending_orders()
             if not orders:
                 keyboard = build_status_keyboard(cfg.enabled)
-                await query.edit_message_text("⏳ <b>Không có lệnh chờ (Pending Orders).</b>", parse_mode=ParseMode.HTML, reply_markup=keyboard)
+                await query.edit_message_text("⏳ <b>Không có lệnh chờ nào.</b>", parse_mode=ParseMode.HTML, reply_markup=keyboard)
             else:
-                lines = ["⏳ <b>Lệnh chờ hiện tại (Pending Orders):</b>\n"]
+                lines = ["⏳ <b>Danh Sách Lệnh Chờ</b>\n━━━━━━━━━━━━━━━━\n"]
                 for o in orders:
                     lines.append(
-                        f"• Ticket <code>{o.ticket}</code>: {o.order_type} {o.volume} <b>{o.symbol}</b> @ {o.price}\n"
-                        f"  SL: {o.sl or 'None'} | TP: {o.tp or 'None'}"
+                        f"• <b>{o.symbol}</b> {o.order_type} {o.volume} lot @ <code>{o.price}</code>\n"
+                        f"  SL: {o.sl or '—'} | TP: {o.tp or '—'} | Ticket: <code>{o.ticket}</code>"
                     )
                 keyboard = build_pending_orders_keyboard(orders)
                 await query.edit_message_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=keyboard)
@@ -978,20 +1279,23 @@ class PersonalTelegramBot:
             ticket = int(data.split("_")[1])
             res = await self.service.broker.cancel_order(ticket)
             if res.success:
-                await query.edit_message_text(f"✅ Đã hủy lệnh chờ {ticket}.")
+                await query.edit_message_text(f"✅ Đã hủy lệnh chờ <code>{ticket}</code>.", parse_mode=ParseMode.HTML)
             else:
-                await query.edit_message_text(f"❌ Không thể hủy lệnh chờ {ticket}: {res.comment}")
+                await query.edit_message_text(f"❌ Không thể hủy lệnh chờ <code>{ticket}</code>: {res.comment}", parse_mode=ParseMode.HTML)
         elif data == "cancel_all_orders":
             orders = await self.service.broker.get_pending_orders()
             results = []
             for o in orders:
                 res = await self.service.broker.cancel_order(o.ticket)
                 if res.success:
-                    results.append(f"✅ Hủy thành công: {o.ticket}")
+                    results.append(f"• Ticket <code>{o.ticket}</code>: ✅ Đã hủy")
                 else:
-                    results.append(f"❌ Lỗi hủy {o.ticket}: {res.comment}")
-            msg = "\n".join(results) if results else "Không có lệnh chờ nào."
-            await query.edit_message_text(msg)
+                    results.append(f"• Ticket <code>{o.ticket}</code>: ❌ Lỗi ({res.comment})")
+            if results:
+                msg = "🗑 <b>Kết Quả Hủy Lệnh Chờ:</b>\n━━━━━━━━━━━━━━━━\n" + "\n".join(results)
+            else:
+                msg = "⏳ <b>Không có lệnh chờ nào.</b>"
+            await query.edit_message_text(msg, parse_mode=ParseMode.HTML)
         elif data == "view_history":
             msg, keyboard = await self._format_history_message(7)
             await query.edit_message_text(msg, parse_mode=ParseMode.HTML, reply_markup=keyboard)
@@ -1042,18 +1346,22 @@ class PersonalTelegramBot:
             await query.edit_message_reply_markup(reply_markup=keyboard)
         elif data == "status_refresh":
             summary = await self.service.get_status_summary()
-            status_icon = "🟢 ACTIVE" if summary["bot_enabled"] else "🔴 PAUSED"
-            conn_icon = "✅ CONNECTED" if summary["connected"] else "❌ DISCONNECTED"
+            status_icon = "🟢 HOẠT ĐỘNG" if summary["bot_enabled"] else "🔴 TẠM DỪNG"
+            conn_icon = "✅ Đã kết nối" if summary["connected"] else "❌ Mất kết nối"
+            now_vn = now_vietnam().strftime("%H:%M:%S %d/%m/%Y")
             msg = (
-                f"📊 <b>System & Trading Status</b>\n\n"
-                f"<b>Bot Status:</b> {status_icon}\n"
-                f"<b>MT5 Broker:</b> {conn_icon} (Server: <code>{summary['server']}</code>)\n"
-                f"<b>Account Login:</b> <code>{summary['login']}</code>\n\n"
-                f"💰 <b>Balance:</b> {summary['balance']} {summary['currency']}\n"
-                f"📈 <b>Equity:</b> {summary['equity']} {summary['currency']}\n"
-                f"🔒 <b>Margin:</b> {summary['margin']} | <b>Free:</b> {summary['free_margin']}\n"
-                f"📂 <b>Open Positions:</b> {summary['open_positions_count']}\n"
-                f"⏳ <b>Pending Orders:</b> {summary.get('pending_orders_count', 0)}"
+                f"📊 <b>Tổng Quan Hệ Thống</b>\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"⏱ {now_vn}\n\n"
+                f"<b>Bot:</b> {status_icon}\n"
+                f"<b>MT5:</b> {conn_icon} — <code>{summary['server']}</code>\n"
+                f"<b>Tài khoản:</b> <code>{summary['login']}</code>\n\n"
+                f"<b>Số dư:</b> {summary['balance']} {summary['currency']}\n"
+                f"<b>Equity:</b> {summary['equity']} {summary['currency']}\n"
+                f"<b>Margin:</b> {summary['margin']} | <b>Khả dụng:</b> {summary['free_margin']}\n"
+                f"<b>Vị thế mở:</b> {summary['open_positions_count']}\n"
+                f"<b>Lệnh chờ:</b> {summary.get('pending_orders_count', 0)}\n"
+                f"━━━━━━━━━━━━━━━━"
             )
             keyboard = build_status_keyboard(summary["bot_enabled"])
             try:

@@ -103,6 +103,110 @@ Chốt lời: 4180"""
         assert signal.new_order.stop_loss == Decimal("4140")
         assert signal.new_order.take_profit == Decimal("4180")
 
+    def test_parse_sell_limit_signal(self, parser):
+        text = """Sell limit #XAU 4165 - 4171
+
+SL: 4175
+
+TP: 4158 - 4149"""
+        signal = parser.parse(text)
+
+        assert signal.message_type == MessageType.NEW_ORDER
+        assert signal.new_order is not None
+        assert signal.new_order.action == OrderAction.SELL
+        assert signal.new_order.symbol == "XAUUSDm"
+        assert signal.new_order.raw_symbol == "#XAU"
+        assert signal.new_order.entry_min == Decimal("4165")  # further from SL (4175)
+        assert signal.new_order.entry_max == Decimal("4171")  # closer to SL (4175)
+        assert signal.new_order.stop_loss == Decimal("4175")
+        assert signal.new_order.take_profit == Decimal("4158")
+        assert signal.new_order.take_profit_2 == Decimal("4149")
+
+    def test_parse_buy_limit_and_stop_orders(self, parser):
+        text1 = "Buy limit #XAU 4120 - 4115\nSL: 4105\nTP: 4135 / 4150"
+        sig1 = parser.parse(text1)
+        assert sig1.message_type == MessageType.NEW_ORDER
+        assert sig1.new_order.action == OrderAction.BUY
+        assert sig1.new_order.entry_min == Decimal("4120")
+        assert sig1.new_order.entry_max == Decimal("4115")
+        assert sig1.new_order.take_profit == Decimal("4135")
+        assert sig1.new_order.take_profit_2 == Decimal("4150")
+
+        text2 = "SELL_LIMIT XAU/USD 4165 - 4171\nSL 4175\nTP1: 4158\nTP2: 4149"
+        sig2 = parser.parse(text2)
+        assert sig2.message_type == MessageType.NEW_ORDER
+        assert sig2.new_order.action == OrderAction.SELL
+        assert sig2.new_order.symbol == "XAUUSDm"
+        assert sig2.new_order.take_profit == Decimal("4158")
+        assert sig2.new_order.take_profit_2 == Decimal("4149")
+
+    def test_parse_markdown_bold_signal(self, parser):
+        text = "**Sell limit** **#XAU** 4165 - 4171\n**SL:** 4175\n**TP:** 4158 - 4149"
+        sig = parser.parse(text)
+        assert sig.message_type == MessageType.NEW_ORDER
+        assert sig.new_order.action == OrderAction.SELL
+        assert sig.new_order.entry_min == Decimal("4165")
+        assert sig.new_order.entry_max == Decimal("4171")
+        assert sig.new_order.stop_loss == Decimal("4175")
+        assert sig.new_order.take_profit == Decimal("4158")
+        assert sig.new_order.take_profit_2 == Decimal("4149")
+
+    def test_parse_symbol_first_format(self, parser):
+        text = "#XAU SELL LIMIT 4165 - 4171\nSL: 4175\nTP: 4158 - 4149"
+        sig = parser.parse(text)
+        assert sig.message_type == MessageType.NEW_ORDER
+        assert sig.new_order.action == OrderAction.SELL
+        assert sig.new_order.symbol == "XAUUSDm"
+        assert sig.new_order.entry_min == Decimal("4165")
+        assert sig.new_order.entry_max == Decimal("4171")
+        assert sig.new_order.stop_loss == Decimal("4175")
+        assert sig.new_order.take_profit == Decimal("4158")
+        assert sig.new_order.take_profit_2 == Decimal("4149")
+
+    def test_parse_separate_entry_line(self, parser):
+        text = "Sell limit #XAU\nEntry: 4165 - 4171\nSL: 4175\nTP: 4158 - 4149"
+        sig = parser.parse(text)
+        assert sig.message_type == MessageType.NEW_ORDER
+        assert sig.new_order.action == OrderAction.SELL
+        assert sig.new_order.symbol == "XAUUSDm"
+        assert sig.new_order.entry_min == Decimal("4165")
+        assert sig.new_order.entry_max == Decimal("4171")
+
+    def test_parse_separate_line_without_entry_keyword(self, parser):
+        text = "Sell limit #XAU\n4165 - 4171\nSL: 4175\nTP: 4158"
+        sig = parser.parse(text)
+        assert sig.message_type == MessageType.NEW_ORDER
+        assert sig.new_order.action == OrderAction.SELL
+        assert sig.new_order.symbol == "XAUUSDm"
+        assert sig.new_order.entry_min == Decimal("4165")
+        assert sig.new_order.entry_max == Decimal("4171")
+
+    def test_parse_flexible_range_delimiters(self, parser):
+        # 1. 'to' delimiter
+        sig1 = parser.parse("BUY #XAU 2340 to 2345\nSL: 2330\nTP: 2360")
+        assert sig1.message_type == MessageType.NEW_ORDER
+        assert sig1.new_order.entry_min == Decimal("2345")
+        assert sig1.new_order.entry_max == Decimal("2340")
+
+        # 2. '->' delimiter
+        sig2 = parser.parse("SELL #XAU 4165 -> 4171\nSL: 4175\nTP: 4150")
+        assert sig2.message_type == MessageType.NEW_ORDER
+        assert sig2.new_order.entry_min == Decimal("4165")
+        assert sig2.new_order.entry_max == Decimal("4171")
+
+        # 3. '~' delimiter
+        sig3 = parser.parse("BUY #XAU 2340 ~ 2345\nSL: 2330\nTP: 2360")
+        assert sig3.message_type == MessageType.NEW_ORDER
+        assert sig3.new_order.entry_min == Decimal("2345")
+        assert sig3.new_order.entry_max == Decimal("2340")
+
+    def test_parse_vietnamese_zone_keywords(self, parser):
+        sig = parser.parse("Bán #XAU quanh 4165 - 4171\nSL 4175\nTP 4158")
+        assert sig.message_type == MessageType.NEW_ORDER
+        assert sig.new_order.action == OrderAction.SELL
+        assert sig.new_order.entry_min == Decimal("4165")
+        assert sig.new_order.entry_max == Decimal("4171")
+
 
 class TestManagementRules:
     def test_parse_combo_management_message(self, parser):

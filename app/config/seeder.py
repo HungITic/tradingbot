@@ -72,8 +72,9 @@ INITIAL_BOT_CONFIGS: list[dict[str, Any]] = [
         "value": {
             "duplicate_timeout_seconds": 10,
             "signal_expire_seconds": 300,
+            "broker_utc_offset_hours": 3,
         },
-        "description": "Signal freshness and deduplication parameters",
+        "description": "Signal freshness, broker timezone offset, and deduplication parameters",
     },
 ]
 

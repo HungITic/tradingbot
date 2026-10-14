@@ -126,6 +126,45 @@ class DealInfo:
 
 
 @dataclass
+class PartialCloseDealInfo:
+    """Individual partial exit deal within a position."""
+
+    ticket: int
+    volume: Decimal
+    price: Decimal
+    profit: Decimal
+    time: datetime
+
+
+@dataclass
+class ClosedPositionInfo:
+    """Aggregated historical closed or partially closed position record."""
+
+    ticket: int  # position_id / position ticket
+    symbol: str
+    position_type: str  # "BUY" or "SELL"
+    volume: Decimal  # Total closed volume
+    open_price: Decimal | None
+    close_price: Decimal  # Volume-weighted average exit price
+    profit: Decimal  # Total realized gross profit
+    swap: Decimal
+    commission: Decimal
+    net_pnl: Decimal
+    open_time: datetime | None
+    close_time: datetime
+    deals_count: int = 1
+    is_fully_closed: bool = True
+    total_volume: Decimal | None = None  # Initial / total volume
+    currency: str = "USD"
+    partial_deals: list[PartialCloseDealInfo] = field(default_factory=list)
+    comment: str = ""
+
+    def __post_init__(self):
+        if self.total_volume is None or self.total_volume <= Decimal("0"):
+            self.total_volume = self.volume
+
+
+@dataclass
 class PendingOrderInfo:
     """Active pending order (Limit/Stop)."""
     ticket: int

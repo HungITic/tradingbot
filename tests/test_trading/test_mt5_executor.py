@@ -138,3 +138,83 @@ async def test_open_order_resolves_symbol(executor):
         mock_mt5.order_send.assert_called_once()
         sent_dict = mock_mt5.order_send.call_args[0][0]
         assert sent_dict["symbol"] == "XAUUSDm"
+
+
+def test_mappers_handle_none_fields_safely():
+    from types import SimpleNamespace
+    from app.broker.mt5.mapper import (
+        map_deal_info,
+        map_position_info,
+        map_pending_order_info,
+        map_account_info,
+        map_symbol_info,
+        map_order_result,
+    )
+
+    mock_none_obj = SimpleNamespace(
+        type=None,
+        entry=None,
+        time=None,
+        ticket=None,
+        order=None,
+        position=None,
+        position_id=None,
+        symbol=None,
+        volume=None,
+        price=None,
+        profit=None,
+        swap=None,
+        commission=None,
+        reason=None,
+        magic=None,
+        comment=None,
+        sl=None,
+        tp=None,
+        time_setup=None,
+        volume_initial=None,
+        price_open=None,
+        price_current=None,
+        trade_mode=None,
+        login=None,
+        balance=None,
+        equity=None,
+        margin=None,
+        margin_free=None,
+        leverage=None,
+        server=None,
+        currency=None,
+        digits=None,
+        name=None,
+        point=None,
+        volume_min=None,
+        volume_max=None,
+        volume_step=None,
+        trade_contract_size=None,
+        retcode=None,
+    )
+
+    deal = map_deal_info(mock_none_obj)
+    assert deal.ticket == 0
+    assert deal.order == 0
+    assert deal.position_id == 0
+    assert deal.reason == 0
+    assert deal.magic == 0
+
+    pos = map_position_info(mock_none_obj)
+    assert pos.ticket == 0
+    assert pos.magic == 0
+
+    po = map_pending_order_info(mock_none_obj)
+    assert po.ticket == 0
+
+    acc = map_account_info(mock_none_obj)
+    assert acc.login == 0
+    assert acc.leverage == 1
+
+    sym = map_symbol_info(mock_none_obj)
+    assert sym.digits == 2
+
+    res = map_order_result(mock_none_obj)
+    assert res.success is False
+    assert res.ticket is None
+

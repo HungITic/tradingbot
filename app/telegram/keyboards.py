@@ -124,10 +124,11 @@ def build_stats_keyboard(days: int = 7) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
-def build_override_keyboard(signal_id: int) -> InlineKeyboardMarkup:
-    """Build buttons to override rejected signals and place Limit orders."""
+def build_override_keyboard(signal_id: int, has_dual: bool = True) -> InlineKeyboardMarkup:
+    """Build buttons to override rejected signals and place orders."""
+    confirm_label = "✅ Vẫn vào lệnh (Cả 2 lệnh)" if has_dual else "✅ Vẫn vào lệnh (Override)"
     keyboard = [
-        [InlineKeyboardButton("✅ Đặt Limit (Min & Max)", callback_data=f"override_both_{signal_id}")],
+        [InlineKeyboardButton(confirm_label, callback_data=f"override_both_{signal_id}")],
         [InlineKeyboardButton("❌ Bỏ qua", callback_data=f"override_ignore_{signal_id}")],
     ]
     return InlineKeyboardMarkup(keyboard)

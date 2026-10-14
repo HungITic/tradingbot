@@ -228,9 +228,9 @@ async def test_service_excessive_slippage_skips_market_order_and_warns(mock_brok
 
 
 @pytest.mark.asyncio
-async def test_service_middle_zone_executes_only_one_market_order(mock_broker):
+async def test_service_middle_zone_executes_both_market_and_pending_limit(mock_broker):
     from datetime import datetime, timezone
-    # SELL 4148 - 4160, current price is 4154 (exact midpoint)
+    # SELL 4148 - 4160, current price is 4154 (midpoint)
     mock_broker.get_tick = AsyncMock(
         return_value=TickInfo(
             symbol="XAUUSDm",
@@ -246,43 +246,21 @@ async def test_service_middle_zone_executes_only_one_market_order(mock_broker):
     raw_signal = "Sell #XAU 4148 - 4160\nSL: 4170\nTP: Trên 200pips"
     await service.process_raw_message(raw_signal)
 
-    # Only 1 market order should be placed, NO pending limit at 4160
-    assert mock_broker.open_order.call_count == 1
-    call_req = mock_broker.open_order.call_args[0][0]
-    assert call_req.order_type == "SELL"
-    assert call_req.price == Decimal("4154.0")
-    assert call_req.comment == "bot-mid-entry"
+    # Both market order (Min Entry) and pending limit (Max Entry) should be placed
+    assert mock_broker.open_order.call_count == 2
+    req_1 = mock_broker.open_order.call_args_list[0][0][0]
+    assert req_1.order_type == "SELL"
+    assert req_1.price == Decimal("4154.0")
+    assert req_1.comment == "bot-min-entry"
 
-    assert len(notifications) == 1
-    assert "Order Executed (Mid Entry)" in notifications[0]
-    assert "khoảng giữa vùng Entry" in notifications[0]
+    req_2 = mock_broker.open_order.call_args_list[1][0][0]
+    assert req_2.order_type == "SELL_LIMIT"
+    assert req_2.price == Decimal("4160")
+    assert req_2.comment == "bot-max-entry"
 
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("price_str", ["4153.0", "4155.0"])
-async def test_service_middle_zone_boundary_executes_only_one_market_order(mock_broker, price_str):
-    from datetime import datetime, timezone
-    mock_broker.get_tick = AsyncMock(
-        return_value=TickInfo(
-            symbol="XAUUSDm",
-            bid=Decimal(price_str),
-            ask=Decimal(price_str) + Decimal("0.5"),
-            time=datetime.now(timezone.utc),
-        )
-    )
-    service = TradingService(broker=mock_broker)
-    notifications = []
-    service.set_notification_callback(lambda msg: notifications.append(msg))
-
-    raw_signal = "Sell #XAU 4148 - 4160\nSL: 4170\nTP: Trên 200pips"
-    await service.process_raw_message(raw_signal)
-
-    # Only 1 market order should be placed
-    assert mock_broker.open_order.call_count == 1
-    call_req = mock_broker.open_order.call_args[0][0]
-    assert call_req.order_type == "SELL"
-    assert call_req.price == Decimal(price_str)
-    assert "Order Executed (Mid Entry)" in notifications[0]
+    assert len(notifications) == 2
+    assert "Order Executed (Min Entry)" in notifications[0]
+    assert "Order Placed (Max Entry)" in notifications[1]
 
 
 @pytest.mark.asyncio
@@ -383,8 +361,84 @@ async def test_service_handles_partial_close_and_auto_breakeven(mock_broker):
 
     # 3. Notifications sent for both close and auto BE
     assert len(notifications) == 2
-    assert "Position Management: Close" in notifications[0]
+    assert "Position Management: Chốt 50%" in notifications[0]
     assert "Auto Breakeven on Partial" in notifications[1]
+
+
+@pytest.mark.asyncio
+async def test_service_skips_duplicate_partial_close_after_tp1(mock_broker):
+    from datetime import datetime, timezone
+
+    pos = PositionInfo(
+        ticket=999888,
+        symbol="XAUUSDm",
+        volume=Decimal("0.02"),
+        open_price=Decimal("2650.00"),
+        current_price=Decimal("2660.00"),
+        sl=Decimal("2650.00"),
+        tp=Decimal("2680.00"),
+        profit=Decimal("20.00"),
+        swap=Decimal("0"),
+        commission=Decimal("0"),
+        position_type="BUY",
+        open_time=datetime.now(timezone.utc),
+    )
+    mock_broker.get_positions = AsyncMock(return_value=[pos])
+
+    service = TradingService(broker=mock_broker)
+    # Simulate that TP1 was already executed by cronjob
+    service._tp1_processed_tickets.add(999888)
+
+    notifications = []
+
+    async def mock_notify(msg: str):
+        notifications.append(msg)
+
+    service.set_notification_callback(mock_notify)
+
+    # Signal: Channel says "chốt bớt vàng"
+    await service.process_raw_message("Kèo vàng TP1 rồi chốt bớt 30% dời SL nha")
+
+    # close_position should NOT be called because it was already partially closed!
+    assert not mock_broker.close_position.called
+
+    # Notification sent explaining skip
+    assert any("Bỏ qua chốt bớt" in n for n in notifications)
+    assert any("Vị thế đã chốt 1 phần trước đó" in n for n in notifications)
+
+
+@pytest.mark.asyncio
+async def test_service_allows_multiple_partial_closes_when_configured(mock_broker):
+    from datetime import datetime, timezone
+
+    pos = PositionInfo(
+        ticket=999889,
+        symbol="XAUUSDm",
+        volume=Decimal("0.02"),
+        open_price=Decimal("2650.00"),
+        current_price=Decimal("2660.00"),
+        sl=Decimal("2650.00"),
+        tp=Decimal("2680.00"),
+        profit=Decimal("20.00"),
+        swap=Decimal("0"),
+        commission=Decimal("0"),
+        position_type="BUY",
+        open_time=datetime.now(timezone.utc),
+    )
+    mock_broker.get_positions = AsyncMock(return_value=[pos])
+
+    service = TradingService(broker=mock_broker)
+    service._tp1_processed_tickets.add(999889)
+    # User explicitly enables multiple partial closes
+    service.risk_config.allow_multiple_partial_closes = True
+
+    await service.process_raw_message("Kèo vàng chốt bớt 50%")
+
+    # close_position should be called because allow_multiple_partial_closes is True
+    assert mock_broker.close_position.called
+    close_call = mock_broker.close_position.call_args[0]
+    assert close_call[0] == 999889
+    assert close_call[1] == Decimal("0.01")
 
 
 @pytest.mark.asyncio
@@ -472,6 +526,272 @@ async def test_service_get_closed_deals(mock_broker):
     # Newest first
     assert closed[0].ticket == 102
     assert closed[1].ticket == 101
+
+
+@pytest.mark.asyncio
+async def test_service_get_closed_positions_aggregated(mock_broker):
+    from datetime import datetime
+
+    deals_sample = [
+        # Position 500: Entry deal (0.10 lot BUY XAUUSD @ 2650)
+        DealInfo(
+            ticket=1,
+            order=1001,
+            position_id=500,
+            symbol="XAUUSD",
+            deal_type="BUY",
+            entry="IN",
+            volume=Decimal("0.10"),
+            price=Decimal("2650.00"),
+            profit=Decimal("0"),
+            swap=Decimal("0"),
+            commission=Decimal("-0.50"),
+            time=datetime(2026, 10, 3, 9, 0),
+        ),
+        # Position 500: Partial close 1 (0.05 lot @ 2660.00, profit +50)
+        DealInfo(
+            ticket=2,
+            order=1002,
+            position_id=500,
+            symbol="XAUUSD",
+            deal_type="SELL",
+            entry="OUT",
+            volume=Decimal("0.05"),
+            price=Decimal("2660.00"),
+            profit=Decimal("50.00"),
+            swap=Decimal("0"),
+            commission=Decimal("-0.25"),
+            time=datetime(2026, 10, 3, 10, 0),
+        ),
+        # Position 500: Partial close 2 (remaining 0.05 lot @ 2670.00, profit +100)
+        DealInfo(
+            ticket=3,
+            order=1003,
+            position_id=500,
+            symbol="XAUUSD",
+            deal_type="SELL",
+            entry="OUT",
+            volume=Decimal("0.05"),
+            price=Decimal("2670.00"),
+            profit=Decimal("100.00"),
+            swap=Decimal("0"),
+            commission=Decimal("-0.25"),
+            time=datetime(2026, 10, 3, 11, 0),
+        ),
+        # Position 501: Single exit SELL EURUSD (exit deal is BUY)
+        DealInfo(
+            ticket=4,
+            order=1004,
+            position_id=501,
+            symbol="EURUSD",
+            deal_type="BUY",
+            entry="OUT",
+            volume=Decimal("0.02"),
+            price=Decimal("1.0820"),
+            profit=Decimal("-10.00"),
+            swap=Decimal("0"),
+            commission=Decimal("-0.20"),
+            time=datetime(2026, 10, 3, 11, 30),
+        ),
+    ]
+    mock_broker.get_history_deals = AsyncMock(return_value=deals_sample)
+    mock_broker.get_positions = AsyncMock(return_value=[])
+
+    service = TradingService(broker=mock_broker)
+    positions = await service.get_closed_positions(days=7)
+
+    # Must aggregate to 2 positions (not 3 exit deals!)
+    assert len(positions) == 2
+
+    # Newest exit first: position 501
+    p_eur = positions[0]
+    assert p_eur.ticket == 501
+    assert p_eur.symbol == "EURUSD"
+    assert p_eur.position_type == "SELL"
+    assert p_eur.volume == Decimal("0.02")
+    assert p_eur.close_price == Decimal("1.0820")
+    assert p_eur.profit == Decimal("-10.00")
+    assert p_eur.deals_count == 1
+    assert p_eur.is_fully_closed is True
+
+    # Position 500: aggregated from 2 partial exits
+    p_gold = positions[1]
+    assert p_gold.ticket == 500
+    assert p_gold.symbol == "XAUUSD"
+    assert p_gold.position_type == "BUY"
+    assert p_gold.volume == Decimal("0.10")
+    assert p_gold.open_price == Decimal("2650.00")
+    # Weighted average: (2660 * 0.05 + 2670 * 0.05) / 0.10 = 2665.0
+    assert p_gold.close_price == Decimal("2665.00000")
+    assert p_gold.profit == Decimal("150.00")
+    assert p_gold.commission == Decimal("-1.00")  # -0.50 + -0.25 + -0.25
+    assert p_gold.net_pnl == Decimal("149.00")
+    assert p_gold.deals_count == 2
+    assert p_gold.is_fully_closed is True
+
+    # Performance summary must also reflect 2 positions
+    stats = await service.get_performance_summary(days=7)
+    assert stats["total_trades"] == 2
+    assert stats["win_trades"] == 1
+    assert stats["loss_trades"] == 1
+    assert stats["win_rate"] == 50.0
+    assert stats["total_profit"] == Decimal("150.00")
+    assert stats["total_loss"] == Decimal("-10.00")
+    assert stats["best_trade"] == Decimal("150.00")
+    assert stats["worst_trade"] == Decimal("-10.00")
+
+
+@pytest.mark.asyncio
+async def test_service_get_closed_positions_partially_closed_active(mock_broker):
+    from datetime import datetime
+
+    deals_sample = [
+        DealInfo(
+            ticket=10,
+            order=2001,
+            position_id=600,
+            symbol="XAUUSD",
+            deal_type="SELL",
+            entry="OUT",
+            volume=Decimal("0.05"),
+            price=Decimal("2660.00"),
+            profit=Decimal("50.00"),
+            swap=Decimal("0"),
+            commission=Decimal("-0.25"),
+            time=datetime(2026, 10, 3, 10, 0),
+        ),
+    ]
+    mock_broker.get_history_deals = AsyncMock(return_value=deals_sample)
+    # Position 600 is still running in open positions!
+    active_pos = PositionInfo(
+        ticket=600,
+        symbol="XAUUSD",
+        volume=Decimal("0.05"),
+        open_price=Decimal("2650.00"),
+        current_price=Decimal("2665.00"),
+        sl=Decimal("2650.00"),
+        tp=Decimal("2680.00"),
+        profit=Decimal("75.00"),
+        swap=Decimal("0"),
+        commission=Decimal("-0.25"),
+        position_type="BUY",
+        open_time=datetime(2026, 10, 3, 9, 0),
+    )
+    mock_broker.get_positions = AsyncMock(return_value=[active_pos])
+
+    service = TradingService(broker=mock_broker)
+    positions = await service.get_closed_positions(days=7)
+
+    assert len(positions) == 1
+    p = positions[0]
+    assert p.ticket == 600
+    assert p.is_fully_closed is False  # Still active
+    assert p.position_type == "BUY"  # Inherited from active position
+    assert p.open_price == Decimal("2650.00")
+    assert p.volume == Decimal("0.05")
+    assert p.deals_count == 1
+
+
+@pytest.mark.asyncio
+async def test_map_deal_info_mt5_mac_and_windows():
+    from unittest.mock import MagicMock
+    from app.broker.mt5.mapper import map_deal_info
+
+    # 1. mt5_mac namedtuple structure with `position` field
+    raw_mac = MagicMock(spec=["position", "ticket", "order", "symbol", "type", "entry", "volume", "price", "profit", "swap", "commission", "time", "reason", "magic", "comment"])
+    raw_mac.position = 777888
+    raw_mac.ticket = 1001
+    raw_mac.order = 2001
+    raw_mac.symbol = "XAUUSD"
+    raw_mac.type = 1  # SELL
+    raw_mac.entry = 1  # OUT
+    raw_mac.volume = 0.05
+    raw_mac.price = 2755.0
+    raw_mac.profit = 45.0
+    raw_mac.swap = 0.0
+    raw_mac.commission = -0.5
+    raw_mac.time = 1700000000
+    raw_mac.reason = 5
+    raw_mac.magic = 234000
+    raw_mac.comment = "[tp 2755.00]"
+
+    deal_mac = map_deal_info(raw_mac)
+    assert deal_mac.position_id == 777888
+    assert deal_mac.deal_type == "SELL"
+    assert deal_mac.entry == "OUT"
+    assert deal_mac.volume == Decimal("0.05")
+
+    # 2. Windows MetaTrader5 structure with `position_id` field
+    raw_win = MagicMock(spec=["position_id", "ticket", "order", "symbol", "type", "entry", "volume", "price", "profit", "swap", "commission", "time", "reason", "magic", "comment"])
+    raw_win.position_id = 999111
+    raw_win.ticket = 1002
+    raw_win.order = 2002
+    raw_win.symbol = "EURUSD"
+    raw_win.type = 0  # BUY
+    raw_win.entry = 0  # IN
+    raw_win.volume = 0.10
+    raw_win.price = 1.0850
+    raw_win.profit = 0.0
+    raw_win.swap = 0.0
+    raw_win.commission = -0.7
+    raw_win.time = 1700000000
+    raw_win.reason = 3
+    raw_win.magic = 234000
+    raw_win.comment = ""
+
+    deal_win = map_deal_info(raw_win)
+    assert deal_win.position_id == 999111
+    assert deal_win.deal_type == "BUY"
+    assert deal_win.entry == "IN"
+
+
+@pytest.mark.asyncio
+async def test_service_get_closed_positions_comment_fallback(mock_broker):
+    from datetime import datetime
+
+    deals_sample = [
+        DealInfo(
+            ticket=201,
+            order=301,
+            position_id=0,
+            symbol="XAUUSD",
+            deal_type="SELL",
+            entry="OUT",
+            volume=Decimal("0.03"),
+            price=Decimal("2660.00"),
+            profit=Decimal("30.00"),
+            swap=Decimal("0"),
+            commission=Decimal("-0.30"),
+            time=datetime(2026, 10, 3, 10, 0),
+            comment="close #998877",
+        ),
+        DealInfo(
+            ticket=202,
+            order=302,
+            position_id=0,
+            symbol="XAUUSD",
+            deal_type="SELL",
+            entry="OUT",
+            volume=Decimal("0.02"),
+            price=Decimal("2670.00"),
+            profit=Decimal("40.00"),
+            swap=Decimal("0"),
+            commission=Decimal("-0.20"),
+            time=datetime(2026, 10, 3, 11, 0),
+            comment="close #998877",
+        ),
+    ]
+    mock_broker.get_history_deals = AsyncMock(return_value=deals_sample)
+    mock_broker.get_positions = AsyncMock(return_value=[])
+
+    service = TradingService(broker=mock_broker)
+    positions = await service.get_closed_positions(days=7)
+
+    assert len(positions) == 1
+    assert positions[0].ticket == 998877
+    assert positions[0].deals_count == 2
+    assert positions[0].volume == Decimal("0.05")
+    assert positions[0].profit == Decimal("70.00")
 
 
 @pytest.mark.asyncio
@@ -666,6 +986,568 @@ async def test_service_buy_dual_entry_min_and_max_entry_handling(mock_broker):
     call_req_2 = mock_broker.open_order.call_args_list[1][0][0]
     assert call_req_2.order_type == "BUY_LIMIT"
     assert call_req_2.price == Decimal("2740")  # Max Entry (gần SL)
+
+
+@pytest.mark.asyncio
+async def test_duplicate_signal_asks_user_confirmation(mock_broker):
+    """When a duplicate signal is received, bot should ask user with interactive buttons."""
+    from datetime import datetime, timezone
+
+    mock_broker.get_tick = AsyncMock(
+        return_value=TickInfo(
+            symbol="XAUUSDm",
+            bid=Decimal("2650.0"),
+            ask=Decimal("2650.5"),
+            time=datetime.now(timezone.utc),
+        )
+    )
+    service = TradingService(broker=mock_broker)
+    notifications = []
+
+    async def mock_notify(msg: str, reply_markup=None):
+        notifications.append((msg, reply_markup))
+
+    service.set_notification_callback(mock_notify)
+
+    raw_signal = "BUY #XAU 2650 - 2648\nSL: 2640\nTP: 2660"
+
+    # First signal succeeds
+    await service.process_raw_message(raw_signal)
+    assert len(notifications) >= 1
+    assert mock_broker.open_order.call_count >= 1
+
+    # Second identical signal sent immediately (within 60s timeout)
+    notifications.clear()
+    await service.process_raw_message(raw_signal)
+
+    # Instead of flat reject, it must ask user with override buttons
+    assert len(notifications) == 1
+    msg, kb = notifications[0]
+    assert "Cảnh báo: Trùng Tín Hiệu (Duplicate Signal)" in msg
+    assert "Tạm dừng đặt lệnh tự động để bạn quyết định!" in msg
+    assert kb is not None  # Keyboard with buttons
+    assert len(service._pending_overrides) >= 1
+
+    # Now simulate user clicking override button
+    sig_id = list(service._pending_overrides.keys())[0]
+    res_msg = await service.execute_override_order(sig_id, "both")
+    assert "Order Placed" in res_msg or "Order Executed" in res_msg
+
+
+@pytest.mark.asyncio
+async def test_max_positions_asks_user_confirmation(mock_broker):
+    """When max open positions reached, bot should ask user with interactive buttons."""
+    from datetime import datetime, timezone
+
+    # Simulate 5 open positions
+    mock_broker.get_positions = AsyncMock(
+        return_value=[
+            PositionInfo(
+                ticket=100 + i,
+                symbol="XAUUSD",
+                volume=Decimal("0.01"),
+                open_price=Decimal("2650"),
+                current_price=Decimal("2651"),
+                sl=None,
+                tp=None,
+                profit=Decimal("10"),
+                swap=Decimal("0"),
+                commission=Decimal("0"),
+                position_type="BUY",
+                open_time=datetime.now(timezone.utc),
+            )
+            for i in range(5)
+        ]
+    )
+    mock_broker.get_tick = AsyncMock(
+        return_value=TickInfo(
+            symbol="XAUUSD",
+            bid=Decimal("2650.0"),
+            ask=Decimal("2650.5"),
+            time=datetime.now(timezone.utc),
+        )
+    )
+
+    service = TradingService(broker=mock_broker)
+    service.risk_config.max_open_positions = 5
+    notifications = []
+
+    async def mock_notify(msg: str, reply_markup=None):
+        notifications.append((msg, reply_markup))
+
+    service.set_notification_callback(mock_notify)
+
+    raw_signal = "BUY #XAU 2650 - 2648\nSL: 2640\nTP: 2660"
+    await service.process_raw_message(raw_signal)
+
+    # Must ask user
+    assert len(notifications) == 1
+    msg, kb = notifications[0]
+    assert "Cảnh báo: Đạt Giới Hạn Vị Thế (Max Positions)" in msg
+    assert "Tạm dừng đặt lệnh tự động để bạn quyết định!" in msg
+    assert kb is not None
+    assert len(service._pending_overrides) >= 1
+
+
+@pytest.mark.asyncio
+async def test_reply_position_management_targets_only_replied_signal_positions(mock_broker):
+    """Verify that a position management signal replying to a previous signal
+    only affects the orders/positions tied to that specific signal."""
+    from datetime import datetime, timezone
+    from app.broker.base import PendingOrderInfo
+
+    pos_sig1_a = PositionInfo(
+        ticket=101,
+        symbol="XAUUSD",
+        volume=Decimal("0.01"),
+        open_price=Decimal("2650.00"),
+        current_price=Decimal("2660.00"),
+        sl=Decimal("2640.00"),
+        tp=Decimal("2670.00"),
+        profit=Decimal("10.00"),
+        swap=Decimal("0"),
+        commission=Decimal("0"),
+        position_type="BUY",
+        open_time=datetime.now(timezone.utc),
+    )
+    pos_sig1_b = PositionInfo(
+        ticket=102,
+        symbol="XAUUSD",
+        volume=Decimal("0.02"),
+        open_price=Decimal("2648.00"),
+        current_price=Decimal("2660.00"),
+        sl=Decimal("2640.00"),
+        tp=Decimal("2670.00"),
+        profit=Decimal("24.00"),
+        swap=Decimal("0"),
+        commission=Decimal("0"),
+        position_type="BUY",
+        open_time=datetime.now(timezone.utc),
+    )
+    pos_sig2 = PositionInfo(
+        ticket=201,
+        symbol="XAUUSD",
+        volume=Decimal("0.05"),
+        open_price=Decimal("2655.00"),
+        current_price=Decimal("2660.00"),
+        sl=Decimal("2645.00"),
+        tp=Decimal("2680.00"),
+        profit=Decimal("25.00"),
+        swap=Decimal("0"),
+        commission=Decimal("0"),
+        position_type="BUY",
+        open_time=datetime.now(timezone.utc),
+    )
+
+    pending_sig1 = PendingOrderInfo(
+        ticket=103,
+        symbol="XAUUSD",
+        order_type="BUY_LIMIT",
+        volume=Decimal("0.01"),
+        price=Decimal("2645.00"),
+        sl=Decimal("2640.00"),
+        tp=Decimal("2670.00"),
+        comment="",
+        setup_time=datetime.now(timezone.utc),
+    )
+    pending_sig2 = PendingOrderInfo(
+        ticket=202,
+        symbol="XAUUSD",
+        order_type="BUY_LIMIT",
+        volume=Decimal("0.02"),
+        price=Decimal("2652.00"),
+        sl=Decimal("2645.00"),
+        tp=Decimal("2680.00"),
+        comment="",
+        setup_time=datetime.now(timezone.utc),
+    )
+
+    mock_broker.get_positions = AsyncMock(return_value=[pos_sig1_a, pos_sig1_b, pos_sig2])
+    mock_broker.get_pending_orders = AsyncMock(return_value=[pending_sig1, pending_sig2])
+    mock_broker.close_position = AsyncMock(return_value=OrderResult(success=True, ticket=101, comment="Closed"))
+    mock_broker.cancel_order = AsyncMock(return_value=OrderResult(success=True, ticket=103, comment="Cancelled"))
+
+    service = TradingService(broker=mock_broker)
+    # Map tickets to signal messages
+    service._signal_msg_id_to_tickets[1000] = [101, 102, 103]
+    service._signal_msg_id_to_tickets[2000] = [201, 202]
+
+    notifications = []
+    async def mock_notify(msg: str, reply_markup=None):
+        notifications.append(msg)
+    service.set_notification_callback(mock_notify)
+
+    # Management command: "Đóng lệnh" replying to message 1000
+    await service.process_raw_message("Đóng lệnh", reply_to_msg_id=1000)
+
+    # 1. Verify positions closed ONLY for tickets 101 and 102
+    closed_tickets = [call.args[0] for call in mock_broker.close_position.call_args_list]
+    assert 101 in closed_tickets
+    assert 102 in closed_tickets
+    assert 201 not in closed_tickets
+
+    # 2. Verify pending order 103 cancelled, but 202 untouched
+    cancelled_tickets = [call.args[0] for call in mock_broker.cancel_order.call_args_list]
+    assert 103 in cancelled_tickets
+    assert 202 not in cancelled_tickets
+
+    # 3. Verify notification includes Signal #1000
+    assert any("Signal #1000" in n for n in notifications)
+
+
+@pytest.mark.asyncio
+async def test_reply_position_management_breakeven_vwap(mock_broker):
+    """Verify that Breakeven dời SL calculates VWAP of only the target signal's positions."""
+    from datetime import datetime, timezone
+
+    # Signal 1000 has 2 positions:
+    # 0.01 lot @ 2650.00
+    # 0.02 lot @ 2640.00
+    # Total vol = 0.03. VWAP = (0.01*2650 + 0.02*2640) / 0.03 = 79.3 / 0.03 = 2643.33333
+    pos_1 = PositionInfo(
+        ticket=101,
+        symbol="XAUUSD",
+        volume=Decimal("0.01"),
+        open_price=Decimal("2650.00"),
+        current_price=Decimal("2660.00"),
+        sl=Decimal("2630.00"),
+        tp=Decimal("2680.00"),
+        profit=Decimal("10.00"),
+        swap=Decimal("0"),
+        commission=Decimal("0"),
+        position_type="BUY",
+        open_time=datetime.now(timezone.utc),
+    )
+    pos_2 = PositionInfo(
+        ticket=102,
+        symbol="XAUUSD",
+        volume=Decimal("0.02"),
+        open_price=Decimal("2640.00"),
+        current_price=Decimal("2660.00"),
+        sl=Decimal("2630.00"),
+        tp=Decimal("2680.00"),
+        profit=Decimal("40.00"),
+        swap=Decimal("0"),
+        commission=Decimal("0"),
+        position_type="BUY",
+        open_time=datetime.now(timezone.utc),
+    )
+    # Unrelated position from another signal at 2700
+    pos_other = PositionInfo(
+        ticket=999,
+        symbol="XAUUSD",
+        volume=Decimal("0.10"),
+        open_price=Decimal("2700.00"),
+        current_price=Decimal("2660.00"),
+        sl=Decimal("2650.00"),
+        tp=Decimal("2750.00"),
+        profit=Decimal("-400.00"),
+        swap=Decimal("0"),
+        commission=Decimal("0"),
+        position_type="BUY",
+        open_time=datetime.now(timezone.utc),
+    )
+
+    mock_broker.get_positions = AsyncMock(return_value=[pos_1, pos_2, pos_other])
+    mock_broker.get_pending_orders = AsyncMock(return_value=[])
+    mock_broker.modify_position = AsyncMock(return_value=OrderResult(success=True, ticket=101, comment="Modified"))
+
+    service = TradingService(broker=mock_broker)
+    service.risk_config.breakeven_offset_price = Decimal("0.0")
+    service._signal_msg_id_to_tickets[1000] = [101, 102]
+
+    # Command: "Dời SL về hòa" replying to message 1000
+    await service.process_raw_message("Dời SL về hòa", reply_to_msg_id=1000)
+
+    # Expected VWAP: (2650*1 + 2640*2) / 3 = 2643.33333
+    expected_vwap = Decimal("2643.33333")
+
+    modified_calls = mock_broker.modify_position.call_args_list
+    assert len(modified_calls) == 2
+    for call in modified_calls:
+        ticket = call.args[0]
+        sl = call.kwargs["sl"]
+        assert ticket in (101, 102)
+        assert sl == expected_vwap
+
+
+@pytest.mark.asyncio
+async def test_reply_position_management_already_closed(mock_broker):
+    """Verify notification when replied-to signal positions are already closed."""
+    from datetime import datetime, timezone
+
+    # Only an unrelated position is open
+    pos_other = PositionInfo(
+        ticket=999,
+        symbol="XAUUSD",
+        volume=Decimal("0.01"),
+        open_price=Decimal("2650.00"),
+        current_price=Decimal("2660.00"),
+        sl=Decimal("2640.00"),
+        tp=Decimal("2680.00"),
+        profit=Decimal("10.00"),
+        swap=Decimal("0"),
+        commission=Decimal("0"),
+        position_type="BUY",
+        open_time=datetime.now(timezone.utc),
+    )
+
+    mock_broker.get_positions = AsyncMock(return_value=[pos_other])
+    mock_broker.get_pending_orders = AsyncMock(return_value=[])
+
+    service = TradingService(broker=mock_broker)
+    service._signal_msg_id_to_tickets[1000] = [101, 102]
+
+    notifications = []
+    async def mock_notify(msg: str, reply_markup=None):
+        notifications.append(msg)
+    service.set_notification_callback(mock_notify)
+
+    # Command replying to message 1000 whose tickets 101, 102 are already closed
+    await service.process_raw_message("Đóng lệnh", reply_to_msg_id=1000)
+
+    assert len(notifications) == 1
+    assert "đã được đóng trước đó" in notifications[0]
+    assert "Signal #1000" in notifications[0]
+
+
+@pytest.mark.asyncio
+async def test_dual_entry_cancels_remaining_pending_limit_when_position_closes(mock_broker):
+    """Verify that in a dual-entry setup, closing one position (Min Entry)
+    automatically cancels the remaining pending limit order (Max Entry)."""
+    from datetime import datetime, timezone
+    from app.broker.base import PendingOrderInfo
+
+    pos_min = PositionInfo(
+        ticket=1001,
+        symbol="XAUUSD",
+        volume=Decimal("0.01"),
+        open_price=Decimal("2650.00"),
+        current_price=Decimal("2660.00"),
+        sl=Decimal("2640.00"),
+        tp=Decimal("2670.00"),
+        profit=Decimal("10.00"),
+        swap=Decimal("0"),
+        commission=Decimal("0"),
+        position_type="BUY",
+        open_time=datetime.now(timezone.utc),
+    )
+    pending_max = PendingOrderInfo(
+        ticket=1002,
+        symbol="XAUUSD",
+        order_type="BUY_LIMIT",
+        volume=Decimal("0.01"),
+        price=Decimal("2645.00"),
+        sl=Decimal("2640.00"),
+        tp=Decimal("2670.00"),
+        comment="bot-max-entry",
+        setup_time=datetime.now(timezone.utc),
+    )
+
+    mock_broker.get_positions = AsyncMock(return_value=[pos_min])
+    mock_broker.get_pending_orders = AsyncMock(return_value=[pending_max])
+    mock_broker.close_position = AsyncMock(return_value=OrderResult(success=True, ticket=1001, comment="Closed"))
+    mock_broker.cancel_order = AsyncMock(return_value=OrderResult(success=True, ticket=1002, comment="Cancelled"))
+
+    service = TradingService(broker=mock_broker)
+    # Both orders belong to signal 500
+    service._signal_db_id_to_tickets[500] = [1001, 1002]
+    service._ticket_to_signal_db_id[1001] = 500
+    service._ticket_to_signal_db_id[1002] = 500
+
+    notifications = []
+    async def mock_notify(msg: str, reply_markup=None):
+        notifications.append(msg)
+    service.set_notification_callback(mock_notify)
+
+    # 1. Close Min Entry position manually / via service
+    res = await service.close_position_by_ticket(1001)
+    assert res.success
+
+    # 2. Assert pending limit order 1002 was cancelled
+    assert mock_broker.cancel_order.called
+    mock_broker.cancel_order.assert_awaited_once_with(1002)
+
+    # 3. Notification sent
+    assert any("Hủy Lệnh Chờ Dual Entry" in n and "1002" in n for n in notifications)
+
+
+@pytest.mark.asyncio
+async def test_dual_entry_both_filled_does_not_cancel(mock_broker):
+    """Verify that if both dual-entry orders have already filled into positions,
+    closing one does not attempt to cancel the other."""
+    from datetime import datetime, timezone
+
+    pos_min = PositionInfo(
+        ticket=1001,
+        symbol="XAUUSD",
+        volume=Decimal("0.01"),
+        open_price=Decimal("2650.00"),
+        current_price=Decimal("2660.00"),
+        sl=Decimal("2640.00"),
+        tp=Decimal("2670.00"),
+        profit=Decimal("10.00"),
+        swap=Decimal("0"),
+        commission=Decimal("0"),
+        position_type="BUY",
+        open_time=datetime.now(timezone.utc),
+    )
+    pos_max = PositionInfo(
+        ticket=1002,
+        symbol="XAUUSD",
+        volume=Decimal("0.01"),
+        open_price=Decimal("2645.00"),
+        current_price=Decimal("2660.00"),
+        sl=Decimal("2640.00"),
+        tp=Decimal("2670.00"),
+        profit=Decimal("15.00"),
+        swap=Decimal("0"),
+        commission=Decimal("0"),
+        position_type="BUY",
+        open_time=datetime.now(timezone.utc),
+    )
+
+    mock_broker.get_positions = AsyncMock(return_value=[pos_min, pos_max])
+    mock_broker.get_pending_orders = AsyncMock(return_value=[])
+    mock_broker.close_position = AsyncMock(return_value=OrderResult(success=True, ticket=1001, comment="Closed"))
+    mock_broker.cancel_order = AsyncMock()
+
+    service = TradingService(broker=mock_broker)
+    service._signal_db_id_to_tickets[500] = [1001, 1002]
+    service._ticket_to_signal_db_id[1001] = 500
+    service._ticket_to_signal_db_id[1002] = 500
+
+    # Close Min Entry position
+    await service.close_position_by_ticket(1001)
+
+    # Assert cancel_order was NOT called because 1002 is not a pending order
+    assert not mock_broker.cancel_order.called
+
+
+@pytest.mark.asyncio
+async def test_reconcile_dual_entry_pending_orders_cancels_when_sibling_closed(mock_broker):
+    """Verify that _reconcile_dual_entry_pending_orders automatically discovers
+    a pending limit order whose sibling position has closed, and cancels it."""
+    from datetime import datetime, timezone
+    from app.broker.base import PendingOrderInfo
+
+    # Sibling position 1001 is completely gone (neither open nor pending)
+    # Pending limit order 1002 is still waiting
+    pending_max = PendingOrderInfo(
+        ticket=1002,
+        symbol="XAUUSD",
+        order_type="BUY_LIMIT",
+        volume=Decimal("0.01"),
+        price=Decimal("2645.00"),
+        sl=Decimal("2640.00"),
+        tp=Decimal("2670.00"),
+        comment="bot-max-entry",
+        setup_time=datetime.now(timezone.utc),
+    )
+
+    mock_broker.get_positions = AsyncMock(return_value=[])  # No open positions
+    mock_broker.get_pending_orders = AsyncMock(return_value=[pending_max])
+    mock_broker.cancel_order = AsyncMock(return_value=OrderResult(success=True, ticket=1002, comment="Cancelled"))
+
+    service = TradingService(broker=mock_broker)
+    service._signal_db_id_to_tickets[500] = [1001, 1002]
+    service._ticket_to_signal_db_id[1002] = 500
+
+    notifications = []
+    async def mock_notify(msg: str, reply_markup=None):
+        notifications.append(msg)
+    service.set_notification_callback(mock_notify)
+
+    # Run reconciliation
+    cancelled = await service._reconcile_dual_entry_pending_orders()
+
+    assert 1002 in cancelled
+    mock_broker.cancel_order.assert_awaited_once_with(1002)
+    assert any("Hủy Lệnh Chờ Dual Entry" in n and "1002" in n for n in notifications)
+
+
+@pytest.mark.asyncio
+async def test_personal_bot_format_history_message(mock_broker):
+    from datetime import datetime
+    from app.telegram.personal_bot import PersonalTelegramBot
+
+    # Simulate 2 partial closes for Position 888
+    deals = [
+        DealInfo(
+            ticket=11,
+            order=3001,
+            position_id=888,
+            symbol="XAUUSD",
+            deal_type="BUY",
+            entry="IN",
+            volume=Decimal("0.10"),
+            price=Decimal("2650.00"),
+            profit=Decimal("0"),
+            swap=Decimal("0"),
+            commission=Decimal("-0.50"),
+            time=datetime(2026, 10, 3, 8, 0),
+        ),
+        DealInfo(
+            ticket=12,
+            order=3002,
+            position_id=888,
+            symbol="XAUUSD",
+            deal_type="SELL",
+            entry="OUT",
+            volume=Decimal("0.05"),
+            price=Decimal("2660.00"),
+            profit=Decimal("50.00"),
+            swap=Decimal("0"),
+            commission=Decimal("-0.25"),
+            time=datetime(2026, 10, 3, 9, 0),
+        ),
+        DealInfo(
+            ticket=13,
+            order=3003,
+            position_id=888,
+            symbol="XAUUSD",
+            deal_type="SELL",
+            entry="OUT",
+            volume=Decimal("0.05"),
+            price=Decimal("2670.00"),
+            profit=Decimal("100.00"),
+            swap=Decimal("0"),
+            commission=Decimal("-0.25"),
+            time=datetime(2026, 10, 3, 10, 0),
+        ),
+    ]
+    mock_broker.get_history_deals = AsyncMock(return_value=deals)
+    mock_broker.get_positions = AsyncMock(return_value=[])
+
+    service = TradingService(broker=mock_broker)
+    bot = PersonalTelegramBot(service=service)
+
+    msg, keyboard = await bot._format_history_message(days=7)
+
+    # Must contain position header, 0.1/0.1 Lots, 2 lần chốt badge
+    assert "Buy XAUUSD" in msg
+    assert "Kết thúc PnL:" in msg
+    assert "+149 USD" in msg
+    assert "Đã đóng/Tổng số lượng:" in msg
+    assert "0.1/0.1 Lots" in msg
+    assert "(2 lần chốt)" in msg
+    # Must show entry and weighted close price with comma formatting
+    assert "Giá mở:" in msg
+    assert "2,650.00" in msg
+    assert "Trung bình Giá đóng:" in msg
+    assert "2,665.00" in msg
+    # Must show close time and ticket
+    assert "Thời gian đóng:" in msg
+    assert "03/10/2026 10:00:00" in msg
+    assert "#888" in msg
+    # Option 2: Must show partial close breakdown tree
+    assert "Chi tiết các lần đóng:" in msg
+    assert "├ <code>0.05 lot @ 2,660.00 (+49.75 USD)</code>" in msg
+    assert "└ <code>0.05 lot @ 2,670.00 (+99.75 USD)</code>" in msg
+    assert "Hiển thị 1 vị thế gần nhất" in msg
+
+
+
 
 
 

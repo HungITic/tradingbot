@@ -198,6 +198,8 @@ async def test_fetch_message_by_link_in_signal_listener():
     mock_msg.id = 1241
     mock_msg.chat_id = -1001904907955
     mock_msg.is_reply = False
+    mock_msg.reply_to_msg_id = None
+    mock_msg.reply_to = None
 
     mock_chat = MagicMock()
     mock_chat.username = "MegaLodonGOLDForex"
@@ -207,7 +209,7 @@ async def test_fetch_message_by_link_in_signal_listener():
     listener.client = mock_client
 
     link = "https://t.me/MegaLodonGOLDForex/1241"
-    raw_text, msg_id, chat_id, canonical_link, is_reentry = (
+    raw_text, msg_id, chat_id, canonical_link, is_reentry, reply_to_msg_id = (
         await listener.fetch_message_by_link(link)
     )
 
@@ -216,6 +218,7 @@ async def test_fetch_message_by_link_in_signal_listener():
     assert chat_id == -1001904907955
     assert canonical_link == "https://t.me/MegaLodonGOLDForex/1241"
     assert is_reentry is False
+    assert reply_to_msg_id is None
 
 
 @pytest.mark.asyncio
@@ -254,6 +257,7 @@ async def test_cmd_replay_and_raw_link_handling():
                 -1001904907955,
                 "https://t.me/MegaLodonGOLDForex/1241",
                 False,
+                None,
             )
         ),
     ):
@@ -265,6 +269,7 @@ async def test_cmd_replay_and_raw_link_handling():
             message_id=1241,
             chat_id=-1001904907955,
             message_link="https://t.me/MegaLodonGOLDForex/1241",
+            reply_to_msg_id=None,
         )
         assert status_message.edit_text.called
 
@@ -281,6 +286,7 @@ async def test_cmd_replay_and_raw_link_handling():
                 -1001904907955,
                 "https://t.me/MegaLodonGOLDForex/1241",
                 False,
+                None,
             )
         ),
     ):
@@ -292,4 +298,5 @@ async def test_cmd_replay_and_raw_link_handling():
             message_id=1241,
             chat_id=-1001904907955,
             message_link="https://t.me/MegaLodonGOLDForex/1241",
+            reply_to_msg_id=None,
         )

@@ -65,19 +65,24 @@ def patch_mt5_mac() -> None:
                 'WINE_BIN = _wine64 if os.path.exists(_wine64) else _wine',
             )
 
+        # Fix any mangled indentation of account_info from prior patch
+        import re
+        content = re.sub(r"\n(?<! )def account_info\(", r"\n    def account_info(", content)
+
         # Ensure terminal_info method exists in MT5Backend
         if "def terminal_info(" not in content:
-            method_code = '''
-    def terminal_info(self) -> MqlTerminalInfo | None:
-        result = self._send({"action": "terminal_info"})
-        if result:
-            fields = {k: result.get(k) for k in MqlTerminalInfo._fields if k in result}
-            return MqlTerminalInfo(**fields)
-        return None
-'''
-            idx = content.find("def account_info(")
-            if idx != -1:
-                content = content[:idx] + method_code + "\n" + content[idx:]
+            target = "    def account_info("
+            method_code = (
+                "    def terminal_info(self) -> MqlTerminalInfo | None:\n"
+                '        result = self._send({"action": "terminal_info"})\n'
+                "        if result:\n"
+                "            fields = {k: result.get(k) for k in MqlTerminalInfo._fields if k in result}\n"
+                "            return MqlTerminalInfo(**fields)\n"
+                "        return None\n\n"
+                "    def account_info("
+            )
+            if target in content:
+                content = content.replace(target, method_code, 1)
             if "MqlTerminalInfo" not in content[:content.find("class MT5Backend")]:
                 content = content.replace(
                     "from mt5_mac.types import (",
@@ -131,15 +136,19 @@ class MqlTerminalInfo(NamedTuple):
         with open(agent_file, "r", encoding="utf-8") as f:
             content = f.read()
 
+        import re
+        content = re.sub(r'\n(?<! )if action == "account_info":', r'\n    if action == "account_info":', content)
+
         if 'action == "terminal_info"' not in content:
-            snippet = '''
-    if action == "terminal_info":
-        info = mt5.terminal_info()
-        return _serialize(info) if info else {}
-'''
-            idx = content.find('if action == "account_info":')
-            if idx != -1:
-                content = content[:idx] + snippet + "\n" + content[idx:]
+            target = '    if action == "account_info":'
+            snippet = (
+                '    if action == "terminal_info":\n'
+                '        info = mt5.terminal_info()\n'
+                '        return _serialize(info) if info else {}\n\n'
+                '    if action == "account_info":'
+            )
+            if target in content:
+                content = content.replace(target, snippet, 1)
                 with open(agent_file, "w", encoding="utf-8") as f:
                     f.write(content)
         print("  ✅ agent.py checked/patched.")

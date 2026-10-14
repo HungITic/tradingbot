@@ -54,6 +54,7 @@ class RiskConfig(BaseModel):
     default_partial_close_percent: Decimal = Decimal("50.0")
     auto_breakeven_on_partial: bool = True
     breakeven_offset_price: Decimal = Decimal("0.0")
+    allow_multiple_partial_closes: bool = False  # False = Chặn chốt từng phần lặp lại cho cùng 1 vị thế
 
     # Dual Entry Setup Rules (Min Entry + Max Entry)
     enable_dual_entry: bool = True
@@ -61,22 +62,31 @@ class RiskConfig(BaseModel):
     lot_max_entry: Decimal = Decimal("0.01")
     max_slippage_entry: Decimal = Decimal("1.0")  # Dung sai tối đa khi giá chạy bất lợi (1 giá / 100 points)
 
+    # Broker Server Timezone Offset
+    broker_utc_offset_hours: int = 3  # Chênh lệch UTC của sàn (PUPrime EET/EEST: +3 hè, +2 đông)
+
     def update_field(self, key: str, value: Any) -> bool:
         """Update any configuration field with validation."""
         if hasattr(self, key):
-            current_val = getattr(self, key)
-            if isinstance(current_val, Decimal):
-                setattr(self, key, Decimal(str(value)))
-            elif isinstance(current_val, bool):
-                setattr(self, key, str(value).lower() in ("true", "1", "yes", "on"))
-            elif isinstance(current_val, int):
-                setattr(self, key, int(value))
-            elif isinstance(current_val, list):
-                if isinstance(value, str):
-                    setattr(self, key, [s.strip().upper() for s in value.split(",") if s.strip()])
+            try:
+                current_val = getattr(self, key)
+                if isinstance(current_val, Decimal):
+                    setattr(self, key, Decimal(str(value)))
+                elif isinstance(current_val, bool):
+                    setattr(self, key, str(value).lower() in ("true", "1", "yes", "on"))
+                elif isinstance(current_val, int):
+                    setattr(self, key, int(value))
+                    if key == "broker_utc_offset_hours":
+                        from app.core.timezone import set_broker_utc_offset_hours
+                        set_broker_utc_offset_hours(int(value))
+                elif isinstance(current_val, list):
+                    if isinstance(value, str):
+                        setattr(self, key, [s.strip().upper() for s in value.split(",") if s.strip()])
+                    else:
+                        setattr(self, key, list(value))
                 else:
-                    setattr(self, key, list(value))
-            else:
-                setattr(self, key, value)
-            return True
+                    setattr(self, key, value)
+                return True
+            except Exception:
+                return False
         return False

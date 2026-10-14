@@ -67,6 +67,7 @@ class MT5Settings(BaseSettings):
     password: str = ""
     server: str = ""
     timeout: int = 10000
+    broker_utc_offset_hours: int = 3
 
 
 class TradingSettings(BaseSettings):

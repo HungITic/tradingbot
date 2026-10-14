@@ -54,6 +54,9 @@ class SymbolNormalizer:
         # Direct lookup
         mapped = self._map.get(clean)
         if not mapped:
+            clean_slash = clean.replace("/", "")
+            mapped = self._map.get(clean_slash)
+        if not mapped:
             # Strip leading hashtag
             if clean.startswith("#"):
                 clean = clean[1:]
@@ -81,9 +84,18 @@ def parse_price(raw_str: str) -> Decimal | None:
         return None
     # If range string like '4146 - 4137' is passed, extract the first segment
     normalized = re.sub(r"[\u2013\u2014]", "-", raw_str.strip())
-    first_part = normalized.split("-")[0].strip()
-    # Remove commas, trailing punctuation
-    clean = re.sub(r"[^\d.]", "", first_part)
+    first_part = re.split(r"\s*(?:->|to|[-–—/~;])\s*", normalized, flags=re.IGNORECASE)[0].strip()
+
+    clean = first_part
+    if "," in clean and "." not in clean:
+        if re.search(r",\d{1,4}$", clean):
+            clean = clean.replace(",", ".")
+        else:
+            clean = clean.replace(",", "")
+    else:
+        clean = clean.replace(",", "")
+
+    clean = re.sub(r"[^\d.]", "", clean)
     try:
         return Decimal(clean)
     except (InvalidOperation, ValueError):
@@ -96,16 +108,17 @@ def parse_price_range(
     sl: Decimal | None = None,
 ) -> tuple[Decimal | None, Decimal | None]:
     """
-    Parse price range formats like '4148 - 4160', '4148 – 4160', or single '4148.5'.
+    Parse price range formats like '4148 - 4160', '4148 – 4160', '4148 / 4160', '4148 to 4160', or single '4148.5'.
     Returns (entry_min, entry_max) according to the rule:
       min entry => giá xa SL hơn (điểm thăm dò / market order ban đầu)
       max entry => giá gần SL hơn (điểm limit order đón / mép sâu của vùng entry)
     """
-    # Replace en-dash, em-dash with hyphen
+    if not range_str:
+        return (None, None)
     normalized = re.sub(r"[\u2013\u2014]", "-", range_str.strip())
-    parts = [p.strip() for p in normalized.split("-") if p.strip()]
+    parts = [p.strip() for p in re.split(r"\s*(?:->|to|[-–—/~;])\s*", normalized, flags=re.IGNORECASE) if p.strip()]
 
-    if len(parts) == 2:
+    if len(parts) >= 2:
         p1 = parse_price(parts[0])
         p2 = parse_price(parts[1])
         if p1 is not None and p2 is not None:
@@ -131,7 +144,10 @@ def parse_price_range(
                 return (min(p1, p2), max(p1, p2))
 
             return (p1, p2)
-        return (p1, p2)
+        elif p1 is not None:
+            return (p1, p1)
+        elif p2 is not None:
+            return (p2, p2)
     elif len(parts) == 1:
         p = parse_price(parts[0])
         return (p, p)

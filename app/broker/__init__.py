@@ -3,8 +3,11 @@
 from app.broker.base import (
     AccountInfo,
     BrokerAdapter,
+    ClosedPositionInfo,
+    DealInfo,
     OrderRequest,
     OrderResult,
+    PartialCloseDealInfo,
     PositionInfo,
     SymbolInfo,
     TickInfo,
@@ -13,6 +16,9 @@ from app.broker.base import (
 __all__ = [
     "BrokerAdapter",
     "AccountInfo",
+    "ClosedPositionInfo",
+    "DealInfo",
+    "PartialCloseDealInfo",
     "TickInfo",
     "SymbolInfo",
     "OrderRequest",

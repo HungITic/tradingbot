@@ -73,9 +73,17 @@ class TelegramSignalListener:
             chat_id = event.chat_id
             msg_id = event.id
             is_reentry = False
+            reply_to_msg_id = getattr(event, "reply_to_msg_id", None)
+            if reply_to_msg_id is None and getattr(event, "reply_to", None):
+                reply_to_msg_id = getattr(event.reply_to, "reply_to_msg_id", None)
 
             try:
                 if event.is_reply:
+                    if reply_to_msg_id is None:
+                        reply_msg = await event.get_reply_message()
+                        if reply_msg:
+                            reply_to_msg_id = reply_msg.id
+
                     from app.signal.models import ManagementType
                     actions = self.service.parser.rule_engine.match_actions(raw_text)
                     if any(a.action_type == ManagementType.REENTRY for a in actions):
@@ -94,6 +102,7 @@ class TelegramSignalListener:
                     "signal_message_received",
                     chat_id=chat_id,
                     message_id=msg_id,
+                    reply_to_msg_id=reply_to_msg_id,
                     message_link=message_link,
                     text_preview=raw_text[:60].replace("\n", " "),
                     is_reentry=is_reentry,
@@ -105,6 +114,7 @@ class TelegramSignalListener:
                     message_id=msg_id, 
                     chat_id=chat_id,
                     message_link=message_link,
+                    reply_to_msg_id=reply_to_msg_id,
                 )
             except Exception as e:
                 logger.exception("signal_processing_error", error=str(e), message_id=msg_id)
@@ -116,10 +126,12 @@ class TelegramSignalListener:
             status="ACTIVE",
         )
 
-    async def fetch_message_by_link(self, link: str) -> tuple[str, int, int, str, bool]:
+    async def fetch_message_by_link(
+        self, link: str
+    ) -> tuple[str, int, int, str, bool, int | None]:
         """
         Fetch message content and metadata from a Telegram link.
-        Returns: (raw_text, message_id, chat_id, canonical_link, is_reentry)
+        Returns: (raw_text, message_id, chat_id, canonical_link, is_reentry, reply_to_msg_id)
         """
         from app.telegram.utils import construct_telegram_message_link, parse_telegram_message_link
 
@@ -160,8 +172,16 @@ class TelegramSignalListener:
 
         chat_id = msg.chat_id
         is_reentry = False
+        reply_to_msg_id = getattr(msg, "reply_to_msg_id", None)
+        if reply_to_msg_id is None and getattr(msg, "reply_to", None):
+            reply_to_msg_id = getattr(msg.reply_to, "reply_to_msg_id", None)
 
         if msg.is_reply:
+            if reply_to_msg_id is None:
+                reply_msg = await msg.get_reply_message()
+                if reply_msg:
+                    reply_to_msg_id = reply_msg.id
+
             from app.signal.models import ManagementType
             actions = self.service.parser.rule_engine.match_actions(raw_text)
             if any(a.action_type == ManagementType.REENTRY for a in actions):
@@ -174,7 +194,7 @@ class TelegramSignalListener:
         username = getattr(chat, "username", None) if chat else (entity if isinstance(entity, str) else None)
         canonical_link = construct_telegram_message_link(chat_id, msg_id, username=username) or link
 
-        return raw_text, msg_id, chat_id, canonical_link, is_reentry
+        return raw_text, msg_id, chat_id, canonical_link, is_reentry, reply_to_msg_id
 
     async def stop(self) -> None:
         """Gracefully disconnect the Telethon client."""

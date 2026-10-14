@@ -55,9 +55,10 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def init_db() -> None:
-    """Verify database connectivity on startup."""
+    """Verify database connectivity on startup and auto-create missing tables."""
+    from app.models import Base  # imports all models into Base.metadata
     async with engine.begin() as conn:
-        await conn.run_sync(lambda c: None)  # connection check
+        await conn.run_sync(Base.metadata.create_all)
     logger.info("database_connected", url=settings.db.url.split("@")[-1])
 
 
