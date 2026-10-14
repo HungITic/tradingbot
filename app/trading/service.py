@@ -1346,13 +1346,13 @@ class TradingService:
             reply_tag = f"• Áp dụng cho: <b>Signal #{reply_to_msg_id}</b>\n" if is_reply_managed else ""
 
             pos_tickets = [p.ticket for p in positions]
-            db_orders: dict[int, Any] = {}
+            db_order_volumes: dict[int, Decimal] = {}
             already_partial_closed_tickets: set[int] = set(self._tp1_processed_tickets)
 
             try:
                 import inspect
                 from app.config.database import get_session
-                from app.models.trade import Order as DBOrder, ManagementAction
+                from app.models.trade import Order as DBOrder, ManagementAction, Position as DBPosition
                 from sqlalchemy import select
 
                 async with get_session() as session:
@@ -1362,13 +1362,22 @@ class TradingService:
                         items_ord = res_ord.all()
                         if inspect.isawaitable(items_ord):
                             items_ord = await items_ord
-                        db_orders = {o.mt5_ticket: o for o in items_ord if hasattr(o, "mt5_ticket")}
+                        # Safely extract scalar volume while session is open to prevent DetachedInstanceError
+                        db_order_volumes = {
+                            o.mt5_ticket: Decimal(str(o.volume))
+                            for o in items_ord
+                            if hasattr(o, "mt5_ticket") and o.volume is not None
+                        }
 
-                        # Check executed partial closes in DB
-                        stmt_act = select(ManagementAction.mt5_ticket).where(
-                            ManagementAction.mt5_ticket.in_(pos_tickets),
-                            ManagementAction.action_type == "PARTIAL_CLOSE",
-                            ManagementAction.status == "EXECUTED",
+                        # Check executed partial closes in DB via Position link
+                        stmt_act = (
+                            select(DBPosition.mt5_ticket)
+                            .join(ManagementAction, ManagementAction.position_id == DBPosition.id)
+                            .where(
+                                DBPosition.mt5_ticket.in_(pos_tickets),
+                                ManagementAction.action_type == "PARTIAL_CLOSE",
+                                ManagementAction.status == "EXECUTED",
+                            )
                         )
                         res_act = await session.scalars(stmt_act)
                         items_act = res_act.all()
@@ -1386,12 +1395,12 @@ class TradingService:
                         vol = pos.volume
                         if action.action_type.value == "PARTIAL_CLOSE":
                             # Check if position was already partially closed (e.g. TP1 milestone reached)
-                            db_order = db_orders.get(pos.ticket)
+                            db_volume = db_order_volumes.get(pos.ticket)
                             is_already_partial = (
                                 not self.risk_config.allow_multiple_partial_closes
                                 and (
                                     pos.ticket in already_partial_closed_tickets
-                                    or (db_order and db_order.volume is not None and pos.volume < db_order.volume)
+                                    or (db_volume is not None and pos.volume < db_volume)
                                 )
                             )
                             if is_already_partial:
@@ -1566,6 +1575,27 @@ class TradingService:
             if res.success:
                 await self.cancel_dual_entry_pending_orders_on_close(pos.ticket, reason="Đóng tất cả")
         return results
+
+    async def partial_close_positions(
+        self,
+        percentage: Decimal = Decimal("50"),
+        symbol: str | None = None,
+    ) -> list[tuple[PositionInfo, OrderResult, Decimal]]:
+        """Partially close all open positions (or filtered by symbol) by a given percentage."""
+        positions = await self.broker.get_positions()
+        if symbol:
+            clean_sym = symbol.upper().replace("#", "").strip()
+            positions = [p for p in positions if p.symbol.upper().startswith(clean_sym)]
+
+        results: list[tuple[PositionInfo, OrderResult, Decimal]] = []
+        pct = percentage / Decimal("100")
+        for pos in positions:
+            vol = (pos.volume * pct).quantize(Decimal("0.01"))
+            vol = max(Decimal("0.01"), min(vol, pos.volume))
+            res = await self.broker.close_position(pos.ticket, vol)
+            results.append((pos, res, vol))
+        return results
+
 
     async def modify_sl_tp(
         self,

@@ -36,17 +36,21 @@ def build_status_keyboard(bot_enabled: bool) -> InlineKeyboardMarkup:
 
 
 def build_positions_keyboard(positions: list[PositionInfo]) -> InlineKeyboardMarkup:
-    """Build action buttons for each active position (Close / Breakeven)."""
+    """Build action buttons for each active position (Close / Breakeven / Partial)."""
     buttons = []
-    for pos in positions[:8]:  # Max 8 on screen
+    for pos in positions[:6]:  # Max 6 on screen
         row = [
-            InlineKeyboardButton(f"❌ Close {pos.ticket}", callback_data=f"close_{pos.ticket}"),
-            InlineKeyboardButton(f"🎯 BE {pos.ticket}", callback_data=f"be_{pos.ticket}"),
+            InlineKeyboardButton(f"❌ Đóng {pos.ticket}", callback_data=f"close_{pos.ticket}"),
+            InlineKeyboardButton(f"✂️ Chốt 50%", callback_data=f"partial_{pos.ticket}_50"),
+            InlineKeyboardButton(f"🎯 BE", callback_data=f"be_{pos.ticket}"),
         ]
         buttons.append(row)
 
     if positions:
-        buttons.append([InlineKeyboardButton("🚨 Close ALL Positions", callback_data="close_all_confirm")])
+        buttons.append([
+            InlineKeyboardButton("✂️ Chốt 50% Tất Cả", callback_data="partial_all_50"),
+            InlineKeyboardButton("🚨 Đóng Toàn Bộ", callback_data="close_all_confirm"),
+        ])
     buttons.append([InlineKeyboardButton("🔄 Refresh", callback_data="positions_refresh")])
 
     return InlineKeyboardMarkup(buttons)

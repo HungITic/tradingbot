@@ -111,6 +111,8 @@ class PersonalTelegramBot:
         self.app.add_handler(CommandHandler("close", self.cmd_close))
         self.app.add_handler(CommandHandler("closeall", self.cmd_closeall))
         self.app.add_handler(CommandHandler("partial", self.cmd_partial))
+        self.app.add_handler(CommandHandler("partialall", self.cmd_partialall))
+        self.app.add_handler(CommandHandler("chotbot", self.cmd_partial))
         self.app.add_handler(CommandHandler("setsl", self.cmd_setsl))
         self.app.add_handler(CommandHandler("settp", self.cmd_settp))
         self.app.add_handler(CommandHandler("breakeven", self.cmd_breakeven))
@@ -222,9 +224,12 @@ class PersonalTelegramBot:
             "/history [ngày] — Lịch sử lệnh đã đóng\n"
             "/stats [ngày] — Thống kê Win/Loss\n"
             "/balance — Số dư &amp; Equity\n"
-            "/close &lt;ticket&gt; — Đóng lệnh\n"
+            "/close &lt;ticket&gt; — Đóng lệnh cụ thể\n"
             "/closeall — Đóng tất cả lệnh\n"
-            "/partial &lt;ticket&gt; &lt;%&gt; — Chốt một phần\n"
+            "/partial &lt;%&gt; — Chốt bớt tất cả lệnh (VD: /partial 50)\n"
+            "/partial &lt;%&gt; &lt;symbol&gt; — Chốt bớt theo cặp (VD: /partial 50 XAU)\n"
+            "/partial &lt;ticket&gt; &lt;%&gt; — Chốt bớt 1 lệnh (VD: /partial 123456 50)\n"
+            "/partialall &lt;%&gt; [symbol] — Đóng một phần các lệnh\n"
             "/setsl &lt;ticket&gt; &lt;giá&gt; — Đặt Stop Loss\n"
             "/settp &lt;ticket&gt; &lt;giá&gt; — Đặt Take Profit\n"
             "/breakeven &lt;ticket&gt; — Dời SL về Entry\n\n"
@@ -505,17 +510,85 @@ class PersonalTelegramBot:
     @admin_only
     async def cmd_partial(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         args = context.args or []
-        if len(args) < 2:
+        if not args:
             await update.message.reply_text(
-                "⚠️ <b>Cú pháp:</b> <code>/partial &lt;ticket&gt; &lt;phần_trăm&gt;</code>\n"
-                "<i>Ví dụ:</i> <code>/partial 123456 50</code> (chốt 50%)",
+                "⚠️ <b>Cú pháp lệnh chốt bớt (Partial Close):</b>\n"
+                "━━━━━━━━━━━━━━━━\n"
+                "• <b>Chốt tất cả vị thế:</b>\n"
+                "  <code>/partial &lt;%&gt;</code>\n"
+                "  <i>Ví dụ:</i> <code>/partial 50</code> (chốt 50% tất cả vị thế đang mở)\n\n"
+                "• <b>Chốt tất cả vị thế của 1 cặp:</b>\n"
+                "  <code>/partial &lt;%&gt; &lt;symbol&gt;</code>\n"
+                "  <i>Ví dụ:</i> <code>/partial 50 XAU</code>\n\n"
+                "• <b>Chốt 1 lệnh cụ thể:</b>\n"
+                "  <code>/partial &lt;ticket&gt; &lt;%&gt;</code>\n"
+                "  <i>Ví dụ:</i> <code>/partial 342003626 50</code>\n"
+                "━━━━━━━━━━━━━━━━\n"
+                "<i>Lệnh tương đương:</i> <code>/partialall &lt;%&gt; [symbol]</code> hoặc <code>/chotbot &lt;%&gt;</code>",
                 parse_mode=ParseMode.HTML,
             )
             return
 
+        # Case 1: 1 argument -> /partial <percent> (e.g. /partial 50 or /partial 50%)
+        if len(args) == 1:
+            raw_arg = args[0].replace("%", "").strip()
+            try:
+                percent = Decimal(raw_arg)
+            except Exception:
+                await update.message.reply_text(
+                    "❌ <b>Phần trăm không hợp lệ.</b>\n"
+                    "Cú pháp chốt tất cả: <code>/partial 50</code>",
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+
+            results = await self.service.partial_close_positions(percentage=percent)
+            if not results:
+                await update.message.reply_text("📂 <b>Không có vị thế nào đang mở để chốt bớt.</b>", parse_mode=ParseMode.HTML)
+                return
+
+            lines = [f"✂️ <b>Chốt Bớt {percent}% Cho Tất Cả Vị Thế</b>\n━━━━━━━━━━━━━━━━"]
+            for pos, res, vol in results:
+                icon = "✅" if res.success else "❌"
+                rem = max(Decimal("0.00"), pos.volume - vol) if res.success else pos.volume
+                status_text = f"Đã đóng: <b>{vol} lot</b> (còn {rem} lot)" if res.success else f"Lỗi: {res.comment}"
+                lines.append(f"{icon} Ticket <code>{pos.ticket}</code> ({pos.symbol}): {status_text}")
+
+            await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+            return
+
+        # Case 2: 2 arguments
+        arg1, arg2 = args[0].strip(), args[1].strip()
+
+        # Check if arg1 is percent and arg2 is symbol (e.g., /partial 50 XAU)
         try:
-            ticket = int(args[0])
-            percent = Decimal(args[1])
+            percent_first = Decimal(arg1.replace("%", ""))
+            if not arg2.isdigit():
+                symbol_filter = arg2
+                results = await self.service.partial_close_positions(percentage=percent_first, symbol=symbol_filter)
+                if not results:
+                    await update.message.reply_text(
+                        f"📂 <b>Không có vị thế nào cho symbol '{symbol_filter}' để chốt bớt.</b>",
+                        parse_mode=ParseMode.HTML,
+                    )
+                    return
+
+                lines = [f"✂️ <b>Chốt Bớt {percent_first}% Vị Thế ({symbol_filter.upper()})</b>\n━━━━━━━━━━━━━━━━"]
+                for pos, res, vol in results:
+                    icon = "✅" if res.success else "❌"
+                    rem = max(Decimal("0.00"), pos.volume - vol) if res.success else pos.volume
+                    status_text = f"Đã đóng: <b>{vol} lot</b> (còn {rem} lot)" if res.success else f"Lỗi: {res.comment}"
+                    lines.append(f"{icon} Ticket <code>{pos.ticket}</code> ({pos.symbol}): {status_text}")
+
+                await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+                return
+        except Exception:
+            pass
+
+        # Otherwise: /partial <ticket> <percent> (e.g. /partial 342003626 50)
+        try:
+            ticket = int(arg1)
+            percent = Decimal(arg2.replace("%", ""))
             positions = await self.service.broker.get_positions()
             target = next((p for p in positions if p.ticket == ticket), None)
             if not target:
@@ -546,6 +619,15 @@ class PersonalTelegramBot:
                 )
         except Exception as e:
             await update.message.reply_text(f"❌ Lỗi: <code>{e}</code>", parse_mode=ParseMode.HTML)
+
+    @admin_only
+    async def cmd_partialall(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Alias for closing partial volume across positions (defaults to 50%)."""
+        args = list(context.args or [])
+        if not args:
+            args = ["50"]
+        context.args = args
+        await self.cmd_partial(update, context)
 
     @admin_only
     async def cmd_setsl(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1242,6 +1324,34 @@ class PersonalTelegramBot:
                 await query.edit_message_text(f"🎯 Đã dời SL vị thế <code>{ticket}</code> về Entry!", parse_mode=ParseMode.HTML)
             else:
                 await query.edit_message_text(f"❌ Không thể dời SL: {res.comment}", parse_mode=ParseMode.HTML)
+        elif data.startswith("partial_"):
+            parts = data.split("_")
+            if parts[1] == "all":
+                pct = Decimal(parts[2]) if len(parts) > 2 else Decimal("50")
+                results = await self.service.partial_close_positions(percentage=pct)
+                if not results:
+                    await query.edit_message_text("📂 <b>Không có vị thế nào đang mở.</b>", parse_mode=ParseMode.HTML)
+                else:
+                    succ = sum(1 for _, r, _ in results if r.success)
+                    await query.edit_message_text(f"✂️ <b>Đã chốt {pct}% cho {succ}/{len(results)} vị thế.</b>", parse_mode=ParseMode.HTML)
+            else:
+                try:
+                    ticket = int(parts[1])
+                    pct = Decimal(parts[2]) if len(parts) > 2 else Decimal("50")
+                    positions = await self.service.broker.get_positions()
+                    target = next((p for p in positions if p.ticket == ticket), None)
+                    if not target:
+                        await query.edit_message_text(f"❌ Không tìm thấy vị thế <code>{ticket}</code>.", parse_mode=ParseMode.HTML)
+                    else:
+                        vol = (target.volume * (pct / Decimal("100"))).quantize(Decimal("0.01"))
+                        vol = max(Decimal("0.01"), min(vol, target.volume))
+                        res = await self.service.close_position_by_ticket(ticket, volume=vol)
+                        if res.success:
+                            await query.edit_message_text(f"✅ Đã chốt {pct}% ({vol} lot) vị thế <code>{ticket}</code>.", parse_mode=ParseMode.HTML)
+                        else:
+                            await query.edit_message_text(f"❌ Chốt vị thế <code>{ticket}</code> thất bại: {res.comment}", parse_mode=ParseMode.HTML)
+                except Exception as e:
+                    await query.edit_message_text(f"❌ Lỗi: <code>{e}</code>", parse_mode=ParseMode.HTML)
         elif data in ("view_positions", "positions_refresh"):
             positions = await self.service.broker.get_positions()
             if not positions:

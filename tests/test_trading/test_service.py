@@ -442,6 +442,64 @@ async def test_service_allows_multiple_partial_closes_when_configured(mock_broke
 
 
 @pytest.mark.asyncio
+async def test_service_combo_chot_bot_and_dich_stoploss(mock_broker):
+    """Verify that combo message executes both modify_position (MOVE_SL) and close_position (PARTIAL_CLOSE)."""
+    from datetime import datetime, timezone
+    from app.broker.base import OrderResult
+
+    pos1 = PositionInfo(
+        ticket=342003626,
+        symbol="XAUUSDm",
+        volume=Decimal("1.00"),
+        open_price=Decimal("4090.00"),
+        current_price=Decimal("4102.00"),
+        sl=Decimal("4080.00"),
+        tp=Decimal("4120.00"),
+        profit=Decimal("120.00"),
+        swap=Decimal("0"),
+        commission=Decimal("0"),
+        position_type="SELL",
+        open_time=datetime.now(timezone.utc),
+    )
+    pos2 = PositionInfo(
+        ticket=342003636,
+        symbol="XAUUSDm",
+        volume=Decimal("1.00"),
+        open_price=Decimal("4095.00"),
+        current_price=Decimal("4102.00"),
+        sl=Decimal("4080.00"),
+        tp=Decimal("4120.00"),
+        profit=Decimal("70.00"),
+        swap=Decimal("0"),
+        commission=Decimal("0"),
+        position_type="SELL",
+        open_time=datetime.now(timezone.utc),
+    )
+    mock_broker.get_positions = AsyncMock(return_value=[pos1, pos2])
+    mock_broker.modify_position = AsyncMock(return_value=OrderResult(success=True, comment="Modified"))
+    mock_broker.close_position = AsyncMock(return_value=OrderResult(success=True, comment="Closed"))
+
+    service = TradingService(broker=mock_broker)
+    raw_msg = (
+        "#XAU Khớp Full 2 Entry Cậu Sập +120pips\n"
+        "Anh em chủ động chốt bớt entry xấu đi dịch stoploss gồng TP"
+    )
+    await service.process_raw_message(raw_msg)
+
+    # 1. Both positions should have SL modified: 2 calls from MOVE_SL + 2 calls from auto_breakeven_on_partial
+    assert mock_broker.modify_position.call_count == 4
+
+    # 2. Both positions should be partially closed (50% = 0.5 lot)
+    assert mock_broker.close_position.call_count == 2
+    closed_tickets = [call[0][0] for call in mock_broker.close_position.call_args_list]
+    closed_volumes = [call[0][1] for call in mock_broker.close_position.call_args_list]
+    assert 342003626 in closed_tickets
+    assert 342003636 in closed_tickets
+    assert closed_volumes == [Decimal("0.50"), Decimal("0.50")]
+
+
+
+@pytest.mark.asyncio
 async def test_service_management_rules_add_and_remove(mock_broker):
     service = TradingService(broker=mock_broker)
 
