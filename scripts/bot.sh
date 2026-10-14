@@ -65,7 +65,7 @@ start_service() {
     launchctl bootout "gui/$(id -u)/$SERVICE_NAME" 2>/dev/null
     launchctl bootstrap "gui/$(id -u)" "$PLIST_DEST" 2>/dev/null || launchctl load -w "$PLIST_DEST" 2>/dev/null
 
-    sleep 1
+    sleep 3
     echo -e "${GREEN}🚀 Đã kích hoạt Trading Bot chạy nền trên macOS!${NC}"
     status_service
 }
@@ -105,6 +105,11 @@ status_service() {
         fi
     else
         echo -e "Trạng thái: ${RED}🔴 ĐANG DỪNG (STOPPED)${NC}"
+        if [ -s "$ERR_FILE" ]; then
+            echo ""
+            echo -e "${RED}⚠️  Log lỗi gần nhất ($ERR_FILE):${NC}"
+            tail -n 10 "$ERR_FILE"
+        fi
     fi
 
     echo ""
