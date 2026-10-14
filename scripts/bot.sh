@@ -27,21 +27,19 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 ensure_installed() {
-    if [ ! -f "$PLIST_DEST" ]; then
-        echo -e "${YELLOW}ℹ️  LaunchAgent chưa được cài đặt. Đang tiến hành cài đặt...${NC}"
-        install_service
-    fi
+    # Luôn đồng bộ cấu hình LaunchAgent với thư mục dự án hiện tại
+    install_service
 }
 
 install_service() {
     mkdir -p "$HOME/Library/LaunchAgents"
     mkdir -p "$PROJECT_DIR/logs"
-    chmod +x "$PROJECT_DIR/scripts/run_daemon.sh"
-    chmod +x "$PROJECT_DIR/scripts/bot.sh"
+    chmod +x "$PROJECT_DIR/scripts/run_daemon.sh" 2>/dev/null || true
+    chmod +x "$PROJECT_DIR/scripts/bot.sh" 2>/dev/null || true
 
     # Dynamically inject the actual PROJECT_DIR into the plist file
     sed "s|/Users/itic/Documents/trading-bot|$PROJECT_DIR|g" "$PLIST_SRC" > "$PLIST_DEST"
-    echo -e "${GREEN}✅ Đã cài đặt LaunchAgent tại: $PLIST_DEST${NC}"
+    echo -e "${GREEN}✅ Đã cấu hình LaunchAgent tại: $PLIST_DEST${NC}"
 }
 
 uninstall_service() {
@@ -58,21 +56,33 @@ start_service() {
     ensure_installed
     mkdir -p "$PROJECT_DIR/logs"
 
-    # Stop any manual running run.py instance first to avoid conflict
+    # Stop any manual or background running run.py instance first
+    pkill -f "caffeinate.*run.py" 2>/dev/null
     pkill -f "python.*run.py" 2>/dev/null
+    sleep 1
 
-    # Load and start via launchctl
+    # 1. Thử khởi động bằng launchctl (macOS LaunchAgent)
     launchctl bootout "gui/$(id -u)/$SERVICE_NAME" 2>/dev/null
     launchctl bootstrap "gui/$(id -u)" "$PLIST_DEST" 2>/dev/null || launchctl load -w "$PLIST_DEST" 2>/dev/null
+    launchctl kickstart -k "gui/$(id -u)/$SERVICE_NAME" 2>/dev/null || launchctl start "$SERVICE_NAME" 2>/dev/null
 
-    sleep 3
-    echo -e "${GREEN}🚀 Đã kích hoạt Trading Bot chạy nền trên macOS!${NC}"
+    sleep 2
+
+    # 2. Nếu launchctl không chạy được (ví dụ kết nối qua SSH không có Aqua session), tự động chạy nền bằng nohup
+    if ! pgrep -f "python.*run.py" >/dev/null; then
+        echo -e "${YELLOW}ℹ️  LaunchAgent không phản hồi (thường do môi trường SSH), đang khởi động daemon nền (nohup)...${NC}"
+        nohup "$PROJECT_DIR/scripts/run_daemon.sh" >> "$LOG_FILE" 2>> "$ERR_FILE" &
+        sleep 2
+    fi
+
+    echo -e "${GREEN}🚀 Đã kích hoạt Trading Bot chạy nền!${NC}"
     status_service
 }
 
 stop_service() {
     echo -e "${YELLOW}⏹️  Đang dừng Trading Bot...${NC}"
-    launchctl bootout "gui/$(id -u)/$SERVICE_NAME" 2>/dev/null || launchctl unload "$PLIST_DEST" 2>/dev/null
+    launchctl bootout "gui/$(id -u)/$SERVICE_NAME" 2>/dev/null
+    launchctl unload "$PLIST_DEST" 2>/dev/null
     pkill -f "caffeinate.*run.py" 2>/dev/null
     pkill -f "python.*run.py" 2>/dev/null
     sleep 1
@@ -108,7 +118,12 @@ status_service() {
         if [ -s "$ERR_FILE" ]; then
             echo ""
             echo -e "${RED}⚠️  Log lỗi gần nhất ($ERR_FILE):${NC}"
-            tail -n 10 "$ERR_FILE"
+            tail -n 12 "$ERR_FILE"
+        fi
+        if [ -s "$LOG_FILE" ]; then
+            echo ""
+            echo -e "${YELLOW}📜 Dòng log cuối ($LOG_FILE):${NC}"
+            tail -n 8 "$LOG_FILE"
         fi
     fi
 
@@ -116,6 +131,12 @@ status_service() {
     echo "LaunchAgent : $([ -f "$PLIST_DEST" ] && echo -e "${GREEN}Đã cài đặt${NC}" || echo -e "${RED}Chưa cài đặt${NC}")"
     echo "Log file    : $LOG_FILE"
     echo "Error file  : $ERR_FILE"
+    echo "=================================================="
+    echo -e "📌 Lệnh hữu ích:"
+    echo -e "  - Xem log hoạt động : ${GREEN}./scripts/bot.sh logs${NC}"
+    echo -e "  - Xem log lỗi       : ${YELLOW}./scripts/bot.sh errors${NC}"
+    echo -e "  - Kiểm tra trạng thái: ${BLUE}./scripts/bot.sh status${NC}"
+    echo -e "  - Chạy trực tiếp    : ${GREEN}./scripts/bot.sh run${NC} (hoặc python run.py)"
     echo "=================================================="
 }
 
@@ -131,6 +152,14 @@ view_errors() {
     touch "$ERR_FILE"
     echo -e "${RED}⚠️  Đang xem error log ($ERR_FILE)... Nhấn Ctrl+C để thoát.${NC}"
     tail -f -n 50 "$ERR_FILE"
+}
+
+run_foreground() {
+    echo -e "${BLUE}🚀 Đang chạy Trading Bot trực tiếp trên Terminal...${NC}"
+    pkill -f "caffeinate.*run.py" 2>/dev/null
+    pkill -f "python.*run.py" 2>/dev/null
+    sleep 1
+    "$PROJECT_DIR/scripts/run_daemon.sh"
 }
 
 case "$1" in
@@ -158,8 +187,11 @@ case "$1" in
     uninstall)
         uninstall_service
         ;;
+    run)
+        run_foreground
+        ;;
     *)
-        echo "Sử dụng: $0 {start|stop|restart|status|logs|errors|install|uninstall}"
+        echo "Sử dụng: $0 {start|stop|restart|status|logs|errors|run|install|uninstall}"
         exit 1
         ;;
 esac

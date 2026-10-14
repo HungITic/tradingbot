@@ -18,14 +18,22 @@ if [ -d "/Applications/MetaTrader 5.app" ] && ! pgrep -f "MetaTrader 5" >/dev/nu
 fi
 
 export PYTHONPATH="$PROJECT_DIR"
-PYTHON_BIN="$PROJECT_DIR/.venv/bin/python"
+export PYTHONUNBUFFERED=1
 
-if [ ! -f "$PYTHON_BIN" ]; then
-    echo "[ERROR] Virtualenv python not found at $PYTHON_BIN" >&2
+if [ -f "$PROJECT_DIR/.venv/bin/python" ]; then
+    PYTHON_BIN="$PROJECT_DIR/.venv/bin/python"
+elif [ -f "$PROJECT_DIR/venv/bin/python" ]; then
+    PYTHON_BIN="$PROJECT_DIR/venv/bin/python"
+elif [ -n "$VIRTUAL_ENV" ] && [ -f "$VIRTUAL_ENV/bin/python" ]; then
+    PYTHON_BIN="$VIRTUAL_ENV/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python3)"
+else
+    echo "[ERROR] Python interpreter not found" >&2
     exit 1
 fi
 
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting Trading Bot with sleep prevention..."
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting Trading Bot with sleep prevention using $PYTHON_BIN..."
 
 # caffeinate options:
 # -i: prevent system idle sleep
