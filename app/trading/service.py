@@ -130,9 +130,21 @@ class TradingService:
         # Start looking from 1 hour ago initially to catch up on missed DB updates
         self._last_sync_time = datetime.now() - timedelta(hours=1)
         _is_first_sync = True
+        _last_reconnect_time = datetime.min
         
         while True:
             try:
+                # Check broker connection before attempting any MT5 operations
+                is_conn = await self.broker.is_connected()
+                if not is_conn:
+                    now_time = datetime.now()
+                    if (now_time - _last_reconnect_time).total_seconds() > 15:
+                        logger.warning("sync_loop_mt5_disconnected", msg="MT5 is not connected. Attempting auto-reconnect...")
+                        await self.broker.connect()
+                        _last_reconnect_time = now_time
+                    await asyncio.sleep(5)
+                    continue
+
                 # Fetch new deals
                 deals = await self.broker.get_history_deals(start_time=self._last_sync_time)
                 

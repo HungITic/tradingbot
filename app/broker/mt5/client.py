@@ -79,7 +79,12 @@ class MT5Client:
 
         async with self._lock:
             if self._connected:
-                return True
+                try:
+                    info = await self.run_in_thread(mt5.terminal_info)
+                    if info and getattr(info, "connected", False):
+                        return True
+                except Exception:
+                    self._connected = False
 
             logger.info("mt5_connecting", server=settings.mt5.server, login=settings.mt5.login)
 
@@ -96,6 +101,12 @@ class MT5Client:
                     init_kwargs["server"] = settings.mt5.server
 
                 try:
+                    # Cleanly reset previous backend process if lingering
+                    if hasattr(mt5, "shutdown"):
+                        try:
+                            mt5.shutdown()
+                        except Exception:
+                            pass
                     ok = mt5.initialize(**init_kwargs)
                     if not ok:
                         # Retry without path if path failed
@@ -110,7 +121,7 @@ class MT5Client:
             ok = await self.run_in_thread(_init)
 
             if not ok:
-                err = mt5.last_error()
+                err = mt5.last_error() if hasattr(mt5, "last_error") else None
                 logger.error("mt5_connect_failed", error=err)
                 self._connected = False
                 return False
@@ -140,8 +151,15 @@ class MT5Client:
         if not self._connected or mt5 is None:
             return False
 
-        info = await self.run_in_thread(mt5.terminal_info)
-        return bool(info and getattr(info, "connected", False))
+        try:
+            info = await self.run_in_thread(mt5.terminal_info)
+            connected = bool(info and getattr(info, "connected", False))
+            if not connected:
+                self._connected = False
+            return connected
+        except Exception:
+            self._connected = False
+            return False
 
 
 # Singleton MT5 client instance

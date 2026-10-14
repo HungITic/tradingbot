@@ -155,40 +155,68 @@ class MT5Executor(BrokerAdapter):
         return clean
 
     async def get_account_info(self) -> AccountInfo:
-        raw = await self._client.run_in_thread(mt5.account_info)
+        if not self._client.is_connected or mt5 is None:
+            raise RuntimeError("MT5 is not connected")
+        try:
+            raw = await self._client.run_in_thread(mt5.account_info)
+        except Exception as e:
+            self._client._connected = False
+            raise RuntimeError(f"Failed to fetch account_info: {e}")
         if raw is None:
-            raise RuntimeError(f"Failed to fetch account_info: {mt5.last_error()}")
+            err = mt5.last_error() if hasattr(mt5, "last_error") else "unknown"
+            raise RuntimeError(f"Failed to fetch account_info: {err}")
         return map_account_info(raw)
 
     async def get_tick(self, symbol: str) -> TickInfo:
+        if not self._client.is_connected or mt5 is None:
+            raise RuntimeError("MT5 is not connected")
         resolved = await self.resolve_symbol(symbol)
-        # Ensure symbol is active in Market Watch
-        await self._client.run_in_thread(mt5.symbol_select, resolved, True)
-        raw = await self._client.run_in_thread(mt5.symbol_info_tick, resolved)
-        if raw is None and resolved != symbol:
-            await self._client.run_in_thread(mt5.symbol_select, symbol, True)
-            raw = await self._client.run_in_thread(mt5.symbol_info_tick, symbol)
-            if raw is not None:
-                resolved = symbol
+        try:
+            # Ensure symbol is active in Market Watch
+            await self._client.run_in_thread(mt5.symbol_select, resolved, True)
+            raw = await self._client.run_in_thread(mt5.symbol_info_tick, resolved)
+            if raw is None and resolved != symbol:
+                await self._client.run_in_thread(mt5.symbol_select, symbol, True)
+                raw = await self._client.run_in_thread(mt5.symbol_info_tick, symbol)
+                if raw is not None:
+                    resolved = symbol
+        except Exception as e:
+            self._client._connected = False
+            raise RuntimeError(f"Failed to fetch tick for {resolved}: {e}")
         if raw is None:
-            raise RuntimeError(f"Failed to fetch tick for {resolved} (requested: {symbol}): {mt5.last_error()}")
+            err = mt5.last_error() if hasattr(mt5, "last_error") else "unknown"
+            raise RuntimeError(f"Failed to fetch tick for {resolved} (requested: {symbol}): {err}")
         return map_tick_info(resolved, raw)
 
     async def get_symbol_info(self, symbol: str) -> SymbolInfo:
+        if not self._client.is_connected or mt5 is None:
+            raise RuntimeError("MT5 is not connected")
         resolved = await self.resolve_symbol(symbol)
-        await self._client.run_in_thread(mt5.symbol_select, resolved, True)
-        raw = await self._client.run_in_thread(mt5.symbol_info, resolved)
-        if raw is None and resolved != symbol:
-            await self._client.run_in_thread(mt5.symbol_select, symbol, True)
-            raw = await self._client.run_in_thread(mt5.symbol_info, symbol)
-            if raw is not None:
-                resolved = symbol
+        try:
+            await self._client.run_in_thread(mt5.symbol_select, resolved, True)
+            raw = await self._client.run_in_thread(mt5.symbol_info, resolved)
+            if raw is None and resolved != symbol:
+                await self._client.run_in_thread(mt5.symbol_select, symbol, True)
+                raw = await self._client.run_in_thread(mt5.symbol_info, symbol)
+                if raw is not None:
+                    resolved = symbol
+        except Exception as e:
+            self._client._connected = False
+            raise RuntimeError(f"Failed to fetch symbol_info for {resolved}: {e}")
         if raw is None:
-            raise RuntimeError(f"Failed to fetch symbol_info for {resolved} (requested: {symbol}): {mt5.last_error()}")
+            err = mt5.last_error() if hasattr(mt5, "last_error") else "unknown"
+            raise RuntimeError(f"Failed to fetch symbol_info for {resolved} (requested: {symbol}): {err}")
         return map_symbol_info(raw)
 
     async def get_positions(self, symbol: str | None = None) -> list[PositionInfo]:
-        raw_list = await self._client.run_in_thread(mt5.positions_get)
+        if not self._client.is_connected or mt5 is None:
+            return []
+        try:
+            raw_list = await self._client.run_in_thread(mt5.positions_get)
+        except Exception as e:
+            logger.warning("mt5_get_positions_failed", error=str(e))
+            self._client._connected = False
+            return []
         if raw_list is None:
             return []
 
@@ -214,7 +242,14 @@ class MT5Executor(BrokerAdapter):
         return matching
 
     async def get_pending_orders(self, symbol: str | None = None) -> list[PendingOrderInfo]:
-        raw_list = await self._client.run_in_thread(mt5.orders_get)
+        if not self._client.is_connected or mt5 is None:
+            return []
+        try:
+            raw_list = await self._client.run_in_thread(mt5.orders_get)
+        except Exception as e:
+            logger.warning("mt5_get_orders_failed", error=str(e))
+            self._client._connected = False
+            return []
         if raw_list is None:
             return []
 
@@ -240,6 +275,9 @@ class MT5Executor(BrokerAdapter):
         return matching
 
     async def open_order(self, request: OrderRequest) -> OrderResult:
+        if not self._client.is_connected or mt5 is None:
+            return OrderResult(success=False, comment="MT5 is not connected")
+
         resolved_symbol = await self.resolve_symbol(request.symbol)
         # Fetch current price if not supplied
         tick = await self.get_tick(resolved_symbol)
@@ -302,8 +340,13 @@ class MT5Executor(BrokerAdapter):
             req_dict["tp"] = float(request.tp)
 
         logger.info("mt5_sending_order", request=req_dict)
-        raw_res = await self._client.run_in_thread(mt5.order_send, req_dict)
-        result = map_order_result(raw_res)
+        try:
+            raw_res = await self._client.run_in_thread(mt5.order_send, req_dict)
+            result = map_order_result(raw_res)
+        except Exception as e:
+            logger.error("mt5_order_send_exception", error=str(e))
+            self._client._connected = False
+            return OrderResult(success=False, comment=f"Order send failed: {e}")
 
         if result.success:
             logger.info("mt5_order_success", ticket=result.ticket, price=result.price)
@@ -318,6 +361,9 @@ class MT5Executor(BrokerAdapter):
         sl: Decimal | None = None,
         tp: Decimal | None = None,
     ) -> OrderResult:
+        if not self._client.is_connected or mt5 is None:
+            return OrderResult(success=False, ticket=ticket, comment="MT5 is not connected")
+
         # Need symbol for position modify
         positions = await self.get_positions()
         target_pos = next((p for p in positions if p.ticket == ticket), None)
@@ -337,24 +383,40 @@ class MT5Executor(BrokerAdapter):
         }
 
         logger.info("mt5_modifying_position", ticket=ticket, sl=sl, tp=tp)
-        raw_res = await self._client.run_in_thread(mt5.order_send, req_dict)
-        return map_order_result(raw_res)
+        try:
+            raw_res = await self._client.run_in_thread(mt5.order_send, req_dict)
+            return map_order_result(raw_res)
+        except Exception as e:
+            logger.error("mt5_modify_position_exception", error=str(e))
+            self._client._connected = False
+            return OrderResult(success=False, ticket=ticket, comment=f"Modify position failed: {e}")
 
     async def cancel_order(self, ticket: int) -> OrderResult:
+        if not self._client.is_connected or mt5 is None:
+            return OrderResult(success=False, ticket=ticket, comment="MT5 is not connected")
+
         from app.broker.mt5.constants import TRADE_ACTION_REMOVE
         req_dict = {
             "action": TRADE_ACTION_REMOVE,
             "order": ticket,
         }
         logger.info("mt5_canceling_order", ticket=ticket)
-        raw_res = await self._client.run_in_thread(mt5.order_send, req_dict)
-        return map_order_result(raw_res)
+        try:
+            raw_res = await self._client.run_in_thread(mt5.order_send, req_dict)
+            return map_order_result(raw_res)
+        except Exception as e:
+            logger.error("mt5_cancel_order_exception", error=str(e))
+            self._client._connected = False
+            return OrderResult(success=False, ticket=ticket, comment=f"Cancel order failed: {e}")
 
     async def close_position(
         self,
         ticket: int,
         volume: Decimal | None = None,
     ) -> OrderResult:
+        if not self._client.is_connected or mt5 is None:
+            return OrderResult(success=False, ticket=ticket, comment="MT5 is not connected")
+
         positions = await self.get_positions()
         target_pos = next((p for p in positions if p.ticket == ticket), None)
         if not target_pos:
@@ -388,13 +450,21 @@ class MT5Executor(BrokerAdapter):
         }
 
         logger.info("mt5_closing_position", ticket=ticket, volume=close_volume)
-        raw_res = await self._client.run_in_thread(mt5.order_send, req_dict)
-        return map_order_result(raw_res)
+        try:
+            raw_res = await self._client.run_in_thread(mt5.order_send, req_dict)
+            return map_order_result(raw_res)
+        except Exception as e:
+            logger.error("mt5_close_position_exception", error=str(e))
+            self._client._connected = False
+            return OrderResult(success=False, ticket=ticket, comment=f"Close position failed: {e}")
 
     async def get_history_deals(
         self, days: int = 7, symbol: str | None = None, start_time: datetime | None = None
     ) -> list[DealInfo]:
         """Fetch historical executed deals within the last `days` days."""
+        if not self._client.is_connected or mt5 is None:
+            return []
+
         now = datetime.now()
         if start_time:
             past = start_time
@@ -405,11 +475,17 @@ class MT5Executor(BrokerAdapter):
         from_ts = int((past - timedelta(days=1)).timestamp())
         to_ts = int((now + timedelta(days=1)).timestamp())
 
+        raw_list = None
         try:
             # mt5_mac JSON-RPC requires int timestamps; native MetaTrader5 accepts either
             raw_list = await self._client.run_in_thread(mt5.history_deals_get, from_ts, to_ts)
         except Exception:
-            raw_list = await self._client.run_in_thread(mt5.history_deals_get, past, now)
+            try:
+                raw_list = await self._client.run_in_thread(mt5.history_deals_get, past, now)
+            except Exception as e2:
+                logger.warning("mt5_history_deals_failed", error=str(e2))
+                self._client._connected = False
+                return []
 
         if not raw_list:
             return []
