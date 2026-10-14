@@ -55,10 +55,18 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def init_db() -> None:
-    """Verify database connectivity on startup and auto-create missing tables."""
+    """Verify database connectivity on startup, auto-create missing tables, and ensure schema migrations."""
+    from sqlalchemy import text
+
     from app.models import Base  # imports all models into Base.metadata
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Ensure recently added columns exist (idempotent for PostgreSQL)
+        if engine.dialect.name == "postgresql":
+            await conn.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS tp1 NUMERIC(15, 5);"))
+            await conn.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS tp2 NUMERIC(15, 5);"))
+            await conn.execute(text("ALTER TABLE parsed_signals ADD COLUMN IF NOT EXISTS take_profit_2 NUMERIC(15, 5);"))
     logger.info("database_connected", url=settings.db.url.split("@")[-1])
 
 
