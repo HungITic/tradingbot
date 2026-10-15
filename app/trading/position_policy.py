@@ -24,13 +24,13 @@ class PositionPolicyMixin:
     def management_policy_description(self) -> str:
         cfg = self.risk_config
         scope = "entry riêng từng ticket"
-        return (f"Hòa vốn theo giá, chưa tính phí/swap: {scope}; không tính trung bình hai entry.\n"
+        return (f"<b>SL VÀ HÒA VỐN</b>\nHòa vốn theo giá, chưa tính phí/swap: {scope}; không tính trung bình hai entry.\n"
                 f"Bù giá: BUY +{cfg.breakeven_offset_price}, SELL −{cfg.breakeven_offset_price}.\n"
-                f"TP1 khi có TP2: {'bật' if cfg.tp1_enabled else 'tắt'}, chốt {cfg.default_partial_close_percent}%.\n"
+                f"\n<b>CHỐT LỜI</b>\nTP1 khi có TP2: {'bật' if cfg.tp1_enabled else 'tắt'}, chốt {cfg.default_partial_close_percent}%.\n"
                 f"Tự dời SL sau chốt: {'bật' if cfg.auto_breakeven_on_partial else 'tắt'}.\n"
                 f"Thiếu lot tại TP1: {'chỉ dời SL nếu đã bật tự dời' if cfg.tp1_min_volume_action == 'breakeven' else 'bỏ qua'}.\n"
                 "Chỉ có một TP: đóng toàn bộ tại TP đó.\n"
-                "Chốt bớt + xấu: chỉ chốt Min Entry theo tỷ lệ, giữ Max Entry.\n"
+                "\n<b>QUẢN LÝ NHÁNH</b>\nChốt bớt + xấu: chỉ chốt Min Entry theo tỷ lệ, giữ Max Entry.\n"
                 f"Chốt bớt chung dùng tỷ lệ cấu hình: {'bật' if cfg.generic_partial_uses_default else 'tắt'}.\n"
                 f"Hủy nhánh chờ sau khi vị thế đóng hết: {'bật' if cfg.auto_cancel_pending_on_full_close else 'tắt'}.\n"
                 f"Giữ SL đang bảo vệ tốt hơn: {'bật' if cfg.breakeven_only_improve else 'tắt'}.\n"
@@ -175,9 +175,19 @@ class PositionPolicyMixin:
         return partial, tp1_done
 
     async def record_management(self, signal_id, pos, action, result, **parameters):
+        metadata = {}
+        if action in {"CLOSE", "PARTIAL_CLOSE"}:
+            cause = parameters.get("reason")
+            if parameters.get("target") == "MIN_ENTRY" and action == "PARTIAL_CLOSE":
+                cause = "MIN_ENTRY_PARTIAL"
+            if cause not in {"TP1_PARTIAL", "FINAL_TP", "MANUAL_PARTIAL", "MANUAL_CLOSE", "CLOSE_ALL", "KILL_SWITCH", "MIN_ENTRY_PARTIAL"}:
+                cause = "SIGNAL_PARTIAL" if action == "PARTIAL_CLOSE" else "SIGNAL_CLOSE"
+            partial = (action == "PARTIAL_CLOSE" or result.retcode == 10010
+                       or (result.volume is not None and 0 < result.volume < pos.volume))
+            metadata = self.close_execution_metadata(pos.ticket, result, cause, partial=partial)
         await self._insert_management_action(signal_id, pos.ticket, action, parameters,
             "EXECUTED" if result.success else "FAILED",
-            {"comment": result.comment, "retcode": result.retcode})
+            {**metadata, "comment": result.comment, "retcode": result.retcode})
 
     async def partial_close_positions(self, percentage=Decimal("50"), symbol=None, ticket=None):
         async with self._execution_lock:

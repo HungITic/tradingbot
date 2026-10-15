@@ -281,5 +281,7 @@ def map_order_result(raw: Any) -> OrderResult:
         price=_safe_decimal(price) if price is not None else None,
         volume=_safe_decimal(volume) if volume is not None else None,
         comment=str(comment or ""),
-        raw=raw._asdict() if hasattr(raw, "_asdict") else (raw if isinstance(raw, dict) else {}),
+        raw=raw._asdict() if hasattr(raw, "_asdict") else (raw if isinstance(raw, dict) else {
+            key: getattr(raw, key, None) for key in ("order", "deal", "retcode", "price", "volume", "comment")
+        }),
     )

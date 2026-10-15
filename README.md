@@ -48,7 +48,7 @@ Nội dung bao gồm:
 ---
 
 ## 🧪 Chạy Kiểm Thử Tự Động (Unit Tests)
-Hệ thống đi kèm bộ kiểm thử tự động 183 test cases kiểm tra Parser, Risk Engine, và Trading Service:
+Hệ thống đi kèm bộ kiểm thử tự động 211 test cases kiểm tra Parser, Risk Engine, và Trading Service:
 ```bash
 DEBUG=false .venv/bin/pytest tests/ -v
 ```

@@ -95,3 +95,16 @@ RETCODE_DESCRIPTIONS: dict[int, str] = {
     10034: "Volume of orders and positions has reached the limit",
     10035: "Position closed",
 }
+
+# ENUM_DEAL_REASON — https://www.mql5.com/en/docs/constants/tradingconstants/dealproperties
+DEAL_REASON_CLIENT = 0
+DEAL_REASON_MOBILE = 1
+DEAL_REASON_WEB = 2
+DEAL_REASON_EXPERT = 3
+DEAL_REASON_SL = 4
+DEAL_REASON_TP = 5
+DEAL_REASON_SO = 6
+DEAL_REASON_ROLLOVER = 7
+DEAL_REASON_VMARGIN = 8
+DEAL_REASON_SPLIT = 9
+DEAL_REASON_CORPORATE_ACTION = 10

@@ -41,10 +41,12 @@ logger = structlog.get_logger(__name__)
 
 
 from app.trading.safety import TradingSafetyMixin
+from app.telegram.presentation import execution_card
 from app.trading.position_policy import PositionPolicyMixin
+from app.trading.close_reporting import CloseReportingMixin
 
 
-class TradingService(PositionPolicyMixin, TradingSafetyMixin):
+class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixin):
     """Core trade coordinator and order router."""
 
     def __init__(
@@ -86,6 +88,7 @@ class TradingService(PositionPolicyMixin, TradingSafetyMixin):
                 self.risk_config = RiskConfig(enabled=False)
 
         self._execution_lock = asyncio.Lock()
+        self._close_executions: dict = {}
         self._recent_signals: list[dict[str, Any]] = []
         self._notify_callback: Callable[..., Coroutine[Any, Any, None]] | None = None
         self._pending_overrides: dict[int, dict[str, Any]] = {}
@@ -190,47 +193,15 @@ class TradingService(PositionPolicyMixin, TradingSafetyMixin):
                         # Position closed (SL, TP or manual)
                         inserted = await self._insert_trade_record(deal)
                         if inserted and not _is_first_sync:
-                            if deal.reason == 3:
-                                reason_str = "Dính SL"
-                            elif deal.reason == 4:
-                                reason_str = "Chốt lời TP"
-                            else:
-                                reason_str = "Đóng lệnh"
-                                
-                            icon = "🟢" if deal.profit > 0 else ("🔴" if deal.profit < 0 else "⚪")
-                            deal_link = self._order_message_links.get(deal.order) or self._order_message_links.get(deal.ticket)
-                            deal_time_str = format_vietnam_time(deal.time, "%d/%m/%Y %H:%M:%S")
-
-                            # In MT5, exit deal direction is opposite of original position
-                            pos_type_title = "Sell" if deal.deal_type == "BUY" else "Buy"
-                            badge_icon = "🔴" if pos_type_title == "Sell" else "🟢"
-                            closed_pos_ticket = deal.position_id if deal.position_id > 0 else deal.order
-
-                            currency = "USD"
+                            currency = ""
                             try:
                                 acc = await self.broker.get_account_info()
-                                if acc and acc.currency:
+                                if acc and isinstance(acc.currency, str):
                                     currency = acc.currency
                             except Exception:
                                 pass
-
-                            if deal.profit % Decimal("1") == Decimal("0"):
-                                pnl_str = f"{deal.profit:+,.0f} {currency}"
-                            else:
-                                pnl_str = f"{deal.profit:+,.2f} {currency}"
-
-                            price_str = f"{deal.price:,.2f}" if deal.price >= Decimal("50") else f"{deal.price:,.4f}"
-
-                            closed_msg = (
-                                f"{badge_icon} <b>{pos_type_title} {deal.symbol}</b>  (<code>#{closed_pos_ticket}</code>)\n"
-                                f"━━━━━━━━━━━━━━━━\n"
-                                f"<b>Kết thúc PnL:</b> {icon} <b>{pnl_str}</b>\n"
-                                f"<b>Khối lượng đóng:</b> <code>{deal.volume} Lots</code>\n"
-                                f"<b>Giá đóng:</b> <code>{price_str}</code>\n"
-                                f"<b>Thời gian đóng:</b> <code>{deal_time_str}</code>\n"
-                                f"<i>Lý do: {reason_str}</i>"
-                            )
-                            await self.notify(self.format_notification(closed_msg, deal_link))
+                            closed_msg, reason_str = await self.format_exit_notification(deal, currency)
+                            await self.notify(closed_msg)
 
                             # Dual Entry: cancel remaining pending limit order if this position closed
                             closed_pos_ticket = deal.position_id if deal.position_id > 0 else deal.order
@@ -1133,15 +1104,7 @@ class TradingService(PositionPolicyMixin, TradingSafetyMixin):
                 entry_label = "(Min Entry)" if has_dual_entry else ""
                 entry_tag = f" {entry_label}" if entry_label else ""
                 now_str = now_vietnam().strftime("%H:%M:%S %d/%m/%Y")
-                msg_1 = (
-                    f"✅ <b>Order Executed{entry_tag}</b>\n"
-                    f"━━━━━━━━━━━━━━━━\n"
-                    f"• <b>{order_req_1.symbol}</b> {order_req_1.order_type}\n"
-                    f"• Khối lượng: <b>{result_1.volume or vol_min} lot</b> @ <code>{result_1.price or current_price}</code>\n"
-                    f"• SL: <code>{order_req_1.sl or '—'}</code> | TP: <code>{order_req_1.tp or '—'}</code>\n"
-                    f"• Ticket: <code>{result_1.ticket}</code>\n"
-                    f"⏱ {now_str}"
-                )
+                msg_1 = execution_card(f"✅ Order Executed{entry_tag}", order_req_1, result_1, now_str)
             else:
                 msg_1 = (
                     f"❌ <b>Order Execution Failed {'(Min Entry)' if has_dual_entry else ''}</b>\n"
@@ -1195,15 +1158,7 @@ class TradingService(PositionPolicyMixin, TradingSafetyMixin):
                             telegram_message_id=message_id,
                         )
                         now_str = now_vietnam().strftime("%H:%M:%S %d/%m/%Y")
-                        msg_2 = (
-                            f"✅ <b>Order Placed (Max Entry)</b>\n"
-                            f"━━━━━━━━━━━━━━━━\n"
-                            f"• <b>{symbol}</b> {order2_type}\n"
-                            f"• Khối lượng: <b>{result_2.volume or vol_max} lot</b> @ <code>{order2_price}</code>\n"
-                            f"• SL: <code>{order_req_2.sl or '—'}</code> | TP: <code>{order_req_2.tp or '—'}</code>\n"
-                            f"• Ticket: <code>{result_2.ticket}</code>\n"
-                            f"⏱ {now_str}"
-                        )
+                        msg_2 = execution_card("✅ Order Placed (Max Entry)", order_req_2, result_2, now_str)
                     else:
                         msg_2 = (
                             f"❌ <b>Order Failed (Max Entry)</b>\n"
@@ -1241,6 +1196,9 @@ class TradingService(PositionPolicyMixin, TradingSafetyMixin):
     ) -> OrderResult:
         """Close an individual position."""
         res = await self.broker.close_position(ticket, volume)
+        metadata = self.close_execution_metadata(ticket, res, "MANUAL_CLOSE", partial=volume is not None or res.retcode == 10010)
+        await self._insert_management_action(None, ticket, "CLOSE", {"reason": "MANUAL_CLOSE"},
+            "EXECUTED" if res.success else "FAILED", {**metadata, "comment": res.comment, "retcode": res.retcode})
         if res.success:
             await self.cancel_dual_entry_pending_orders_on_close(ticket, reason="Đóng thủ công / Admin")
         return res
@@ -1251,6 +1209,7 @@ class TradingService(PositionPolicyMixin, TradingSafetyMixin):
         results: list[OrderResult] = []
         for pos in positions:
             res = await self.broker.close_position(pos.ticket, pos.volume)
+            await self.record_management(None, pos, "CLOSE", res, reason="CLOSE_ALL")
             results.append(res)
             if res.success:
                 await self.cancel_dual_entry_pending_orders_on_close(pos.ticket, reason="Đóng tất cả")

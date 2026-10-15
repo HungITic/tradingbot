@@ -6,6 +6,7 @@ from decimal import Decimal
 from html import escape
 from typing import Any
 
+from app.telegram.presentation import heading, section, field, price as display_price, number, DIVIDER
 from app.broker.base import OrderRequest, OrderResult
 from app.core.timezone import now_vietnam, to_vietnam_datetime
 from app.signal.models import MessageType, OrderAction
@@ -72,7 +73,7 @@ class TradingSafetyMixin:
         signal = self.parser.parse(raw_text)
         signal.is_reentry = is_reentry
         problem = self.signal_problem(signal, signal_time)
-        lines = ["🔎 <b>Xem trước tín hiệu — chưa thực thi</b>"]
+        lines = [heading("🔎 Xem trước tín hiệu", "Chưa thực thi giao dịch"), ""]
         if signal_time:
             lines.append(f"Tin gốc: {escape(to_vietnam_datetime(signal_time).strftime('%H:%M:%S %d/%m/%Y'))}")
         can_execute = False
@@ -84,10 +85,13 @@ class TradingSafetyMixin:
                     and order.entry_max != order.entry_min)
             volumes = ([self.risk_config.lot_min_entry, self.risk_config.lot_max_entry] if dual
                        else [self.risk_config.default_lot])
-            lines += [f"<b>{order.action.value} {escape(order.symbol)}</b>",
-                      f"Vùng vào: {order.entry_min} → {order.entry_max or order.entry_min}",
-                      f"SL: {order.stop_loss or 'thiếu'} | TP1: {order.take_profit or '—'} | TP2: {order.take_profit_2 or '—'}",
-                      f"Dự kiến tối đa {len(volumes)} lệnh · Tổng {sum(volumes)} lot"]
+            lines += ["", heading(f"{order.symbol} · {order.action.value}"), "",
+                section("VÙNG VÀO LỆNH", field("Entry thứ nhất", display_price(order.entry_min), code=True),
+                    field("Entry thứ hai", display_price(order.entry_max or order.entry_min), code=True)), "",
+                section("BẢO VỆ LỆNH", field("SL · Dừng lỗ", display_price(order.stop_loss), code=True),
+                    field("TP1", display_price(order.take_profit), code=True), field("TP2", display_price(order.take_profit_2), code=True)), "",
+                section("KHỐI LƯỢNG DỰ KIẾN", field("Số lệnh tối đa", len(volumes)),
+                    field("Tổng khối lượng", f"{number(sum(volumes))} lot")), ""]
             if not problem:
                 context = await self.build_risk_context()
                 context.planned_order_count = len(volumes)
@@ -98,7 +102,7 @@ class TradingSafetyMixin:
                 try:
                     tick = await self.checked_tick(order.symbol)
                     price = tick.ask if order.action == OrderAction.BUY else tick.bid
-                    lines.append(f"Giá hiện tại: {price}")
+                    lines.append(field("Giá hiện tại", number(price, minimum=2), code=True))
                     req = OrderRequest(order.symbol, order.action.value, volumes[0], price,
                                        order.stop_loss, order.take_profit_2 or order.take_profit,
                                        order.take_profit, order.take_profit_2)
@@ -106,7 +110,7 @@ class TradingSafetyMixin:
                 except Exception as exc:
                     problem = str(exc)
             can_execute = not problem
-            lines.append(self.management_policy_description())
+            lines.extend(["", DIVIDER, "", self.management_policy_description(), ""])
             lines.append("Khi thực thi, bot kiểm tra lại giá và có thể yêu cầu duyệt nếu vượt vùng/trượt giá.")
         else:
             lines.append("Quản lý vị thế: " + ", ".join(a.action_type.value for a in signal.management_actions))
@@ -141,7 +145,7 @@ class TradingSafetyMixin:
                             lines.append("Chỉ chốt Min Entry: " + ", ".join(f"#{p.ticket}" for p in selected) + "; giữ nguyên Max Entry.")
                 except Exception as exc:
                     problem = problem or str(exc)
-            lines.append(self.management_policy_description())
+            lines.extend(["", DIVIDER, "", self.management_policy_description(), ""])
             for action in signal.management_actions:
                 if action.action_type.value == "PARTIAL_CLOSE":
                     lines.append(f"Tỷ lệ chốt thực thi: {self.partial_percentage(action)}%")
@@ -149,9 +153,9 @@ class TradingSafetyMixin:
                     lines.append(f"SL đích được yêu cầu: {action.price}")
             can_execute = not problem
         if problem:
-            lines.append(f"⛔ {escape(problem)}")
+            lines.extend(["", section("⛔ CHƯA ĐỦ ĐIỀU KIỆN", escape(problem))])
         else:
-            lines.append("✅ Đủ điều kiện để gửi vào luồng kiểm tra thực thi.")
+            lines.extend(["", section("✅ KẾT QUẢ KIỂM TRA", "Đủ điều kiện để gửi vào luồng kiểm tra thực thi.")])
         return {"text": "\n".join(lines), "can_execute": can_execute}
 
     async def emergency_stop(self) -> dict:
@@ -175,7 +179,9 @@ class TradingSafetyMixin:
                 positions = await self.broker.get_positions()
                 for pos in positions:
                     try:
-                        closes.append(await self.broker.close_position(pos.ticket, pos.volume))
+                        result = await self.broker.close_position(pos.ticket, pos.volume)
+                        closes.append(result)
+                        await self.record_management(None, pos, "CLOSE", result, reason="KILL_SWITCH")
                     except Exception as exc:
                         closes.append(OrderResult(False, ticket=pos.ticket, comment=str(exc)))
             except Exception as exc:

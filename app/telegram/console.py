@@ -8,6 +8,7 @@ from html import escape
 from telegram import InlineKeyboardButton as Button, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.constants import ParseMode
 
+from app.telegram.presentation import heading, section, field, number, money, position_card, pending_card, join_cards, config_value, DIVIDER
 from app.core.timezone import format_vietnam_time, now_vietnam
 from app.telegram.keyboards import build_positions_keyboard, build_risk_config_keyboard, build_status_keyboard
 
@@ -64,58 +65,72 @@ class TelegramConsoleMixin:
     def prepare_config(self, updates: dict) -> tuple[str, InlineKeyboardMarkup]:
         cfg = self.service.risk_config
         candidate = cfg.with_updates(updates)
-        lines = ["⚙️ <b>Xem trước thay đổi — chưa lưu</b>"]
+        cards = [heading("⚙️ Xem trước thay đổi", "Chưa lưu thay đổi")]
         for key in updates:
-            lines.append(f"• {escape(CONFIG_FIELDS.get(key, key))}: <b>{escape(str(getattr(cfg, key)))}</b> → <b>{escape(str(getattr(candidate, key)))}</b>")
+            cards.append(section(CONFIG_FIELDS.get(key, key),
+                field("Hiện tại", config_value(getattr(cfg, key))),
+                field("Sau khi lưu", config_value(getattr(candidate, key)))))
+        lines = [join_cards(cards)]
         token = self.new_draft("config", {"updates": updates, "before": cfg.model_dump(mode="json")})
         return "\n".join(lines), self.draft_keyboard(token)
+
+    async def display_currency(self):
+        try:
+            account = await self.service.broker.get_account_info()
+            return account.currency if isinstance(account.currency, str) else ""
+        except Exception:
+            return ""
 
     async def status_view(self):
         from app.telegram.signal_listener import signal_listener
         summary = await self.service.get_status_summary()
         client = signal_listener.client
         listening = bool(signal_listener._running and client and client.is_connected())
-        pnl = str(summary["today_pnl"]) if summary["daily_available"] else "Chưa đọc được dữ liệu"
-        text = (f"📊 <b>Tổng quan · {now_vietnam().strftime('%H:%M:%S %d/%m/%Y')}</b>\n"
-                f"Mở lệnh mới: {'🟢 Cho phép' if summary['bot_enabled'] else '⏸ Tạm dừng'}\n"
-                f"MT5: {'✅ Kết nối' if summary['connected'] else '❌ Mất kết nối'}\n"
-                f"Telegram nhận tín hiệu: {'✅ Kết nối' if listening else '❌ Chưa sẵn sàng'}\n"
-                f"Tài khoản: <code>{summary['login']}</code> · {escape(summary['server'])}\n\n"
-                f"Số dư: {summary['balance']} {escape(summary['currency'])}\n"
-                f"Equity: {summary['equity']} · Khả dụng: {summary['free_margin']}\n"
-                f"Lãi/lỗ thực hiện hôm nay (giờ VN): {pnl}\n"
-                f"{summary['open_positions_count']} vị thế · {summary['pending_orders_count']} lệnh chờ\n"
-                f"{summary['awaiting_approval']} tín hiệu chờ duyệt")
-        return text, build_status_keyboard(summary["bot_enabled"])
+        currency = summary["currency"]
+        pnl = money(summary["today_pnl"], currency, signed=True) if summary["daily_available"] else "Chưa đọc được dữ liệu"
+        blocks = [heading("📊 Tổng quan", "Cập nhật " + now_vietnam().strftime('%H:%M:%S · %d/%m/%Y')),
+            section("TRẠNG THÁI", field("Mở lệnh mới", "🟢 Cho phép" if summary['bot_enabled'] else "⏸ Tạm dừng"),
+                field("MT5", "✅ Kết nối" if summary['connected'] else "❌ Mất kết nối"),
+                field("Nhận tín hiệu", "✅ Kết nối" if listening else "❌ Chưa sẵn sàng")),
+            section("TÀI KHOẢN", field("Số tài khoản", summary['login'], code=True), field("Máy chủ", summary['server']),
+                field("Số dư", money(summary['balance'], currency)), field("Equity", money(summary['equity'], currency)),
+                field("Khả dụng", money(summary['free_margin'], currency))),
+            section("HÔM NAY · GIỜ VIỆT NAM", field("Lãi/lỗ đã chốt", pnl)),
+            section("CẦN THEO DÕI", field("Vị thế đang mở", summary['open_positions_count']),
+                field("Lệnh chờ", summary['pending_orders_count']), field("Tín hiệu chờ duyệt", summary['awaiting_approval']))]
+        return join_cards(blocks), build_status_keyboard(summary["bot_enabled"])
 
     async def positions_view(self, page: int = 0):
         positions = sorted(await self.service.broker.get_positions(), key=lambda p: p.ticket)
         page = min(max(page, 0), max(0, (len(positions) - 1) // 5))
-        lines = [f"📋 <b>Vị thế · Trang {page + 1}</b>",
-                 "Phạm vi: toàn tài khoản. Mỗi hàng nút ứng với ticket phía trên."]
-        for pos in positions[page * 5:page * 5 + 5]:
-            lines.append(f"\n<b>{escape(pos.symbol)} {escape(pos.position_type)}</b> · #{pos.ticket}\n"
-                         f"{pos.volume} lot · Lãi/lỗ: {pos.profit:+.2f}\n"
-                         f"Vào: {pos.open_price} → Hiện tại: {pos.current_price}\n"
-                         f"SL: {pos.sl or '—'} · TP: {pos.tp or '—'}")
+        pages = max(1, (len(positions) + 4) // 5)
+        currency = await self.display_currency()
+        cards = [heading("📋 Vị thế đang mở", f"Trang {page + 1}/{pages} · {len(positions)} vị thế · Toàn tài khoản")]
+        cards += [position_card(pos, currency, page * 5 + i + 1)
+                  for i, pos in enumerate(positions[page * 5:page * 5 + 5])]
         if not positions:
-            lines.append("Không có vị thế đang mở.")
-        return "\n".join(lines), build_positions_keyboard(positions, page, self.service.risk_config.default_partial_close_percent)
+            cards.append("Không có vị thế đang mở.")
+        else:
+            cards.append("<i>Nút thao tác ghi số thứ tự và ticket tương ứng với lệnh bên trên.</i>")
+        return join_cards(cards), build_positions_keyboard(positions, page, self.service.risk_config.default_partial_close_percent)
 
     async def inbox_view(self, page: int = 0, status: str = "ALL"):
         labels = {"ALL": "Tất cả", "AWAITING_APPROVAL": "Chờ duyệt", "EXECUTED": "Đã thực thi",
                   "REJECTED": "Bị chặn", "UNKNOWN": "Không hiểu", "ERROR": "Lỗi", "PARTIAL": "Một phần"}
         rows = await self.service.get_signal_inbox(page, status)
-        lines = [f"📥 <b>Tín hiệu · {labels.get(status, status)} · Trang {page + 1}</b>"]
+        lines = [heading("📥 Hộp thư tín hiệu", f"{labels.get(status, status)} · Trang {page + 1}")]
         buttons = [[Button("Tất cả", callback_data="inbox_ALL_0"), Button("Chờ duyệt", callback_data="inbox_AWAITING_APPROVAL_0"),
                     Button("Bị chặn", callback_data="inbox_REJECTED_0")],
                    [Button("Đã thực thi", callback_data="inbox_EXECUTED_0"), Button("Không hiểu", callback_data="inbox_UNKNOWN_0"),
                     Button("Lỗi", callback_data="inbox_ERROR_0")]]
         for signal, details in rows[:5]:
-            lines.append(f"\n<b>#{signal.id} · {labels.get(signal.status, signal.status)}</b> · {format_vietnam_time(signal.received_at)}\n"
-                         f"{escape(signal.raw_message[:220])}")
+            lines.append(DIVIDER)
+            lines.append(heading(f"Tín hiệu #{signal.id}") + "\n"
+                + field("Trạng thái", labels.get(signal.status, signal.status)) + "\n"
+                + field("Nhận lúc", format_vietnam_time(signal.received_at)))
+            lines.append("\n<b>NỘI DUNG</b>\n" + escape(signal.raw_message[:220]))
             if details and details.get("reason"):
-                lines.append("Lý do: " + escape(str(details["reason"])[:200]))
+                lines.append("\n<b>LÝ DO XỬ LÝ</b>\n" + escape(str(details["reason"])[:200]))
             if signal.id in self.service._pending_overrides:
                 buttons.append([Button(f"Xem quyết định #{signal.id}", callback_data=f"review_{signal.id}")])
         if not rows:
@@ -132,29 +147,48 @@ class TelegramConsoleMixin:
 
     async def setups_view(self, page: int = 0):
         groups = await self.service.get_setup_cards()
-        page = min(max(page, 0), max(0, (len(groups) - 1) // 4))
-        lines = [f"🗂 <b>Kèo đang chạy · Trang {page + 1}</b>"]
-        for group in groups[page * 4:page * 4 + 4]:
-            positions, orders = group["positions"], group["orders"]
-            lines.append(f"\n<b>{escape(group['name'])}</b>\n"
-                         f"{len(positions)} vị thế · {len(orders)} lệnh chờ\n"
-                         f"Lãi/lỗ đang chạy: {sum(p.profit for p in positions):+.2f}")
-            for pos in positions:
-                lines.append(f"#{pos.ticket} {escape(pos.symbol)} {pos.position_type} · {pos.volume} lot · SL {pos.sl or '—'} · TP {pos.tp or '—'}")
-            for order in orders:
-                lines.append(f"Chờ #{order.ticket} {escape(order.symbol)} {order.order_type} · {order.volume} lot @ {order.price}")
-        if not groups:
-            lines.append("Không có kèo đang chạy.")
+        # Bound rendered items, so a setup with many tickets cannot overflow one Telegram message.
+        entries = [(index, group, item, is_pending)
+                   for index, group in enumerate(groups)
+                   for is_pending, items in [(False, group["positions"]), (True, group["orders"])]
+                   for item in items]
+        page = min(max(page, 0), max(0, (len(entries) - 1) // 4))
+        pages = max(1, (len(entries) + 3) // 4)
+        currency = await self.display_currency()
+        cards = [heading("🗂 Kèo đang chạy", f"Trang {page + 1}/{pages} · {len(groups)} kèo · Cập nhật {now_vietnam().strftime('%H:%M:%S')}")]
+        previous_group = None
+        for index, group, item, is_pending in entries[page * 4:page * 4 + 4]:
+            if index != previous_group:
+                positions, orders = group["positions"], group["orders"]
+                pnl = sum(p.profit for p in positions)
+                cards.append(heading(group['name']) + "\n\n"
+                    + section("TỔNG KÈO", field("Vị thế đang mở", len(positions)), field("Lệnh chờ", len(orders)),
+                        field("Lãi/lỗ đang chạy", money(pnl, currency, signed=True))))
+                previous_group = index
+            cards.append(pending_card(item) if is_pending else position_card(item, currency))
+        if not entries:
+            cards.append("Không có kèo đang chạy.")
         buttons = [[Button("Quản lý vị thế", callback_data="positions_page_0"), Button("Lệnh chờ", callback_data="view_orders")]]
         nav = []
         if page:
             nav.append(Button("← Trước", callback_data=f"setups_{page - 1}"))
-        if len(groups) > (page + 1) * 4:
+        if len(entries) > (page + 1) * 4:
             nav.append(Button("Sau →", callback_data=f"setups_{page + 1}"))
         if nav:
             buttons.append(nav)
         buttons.append([Button("Tổng quan", callback_data="status_refresh")])
-        return "\n".join(lines), InlineKeyboardMarkup(buttons)
+        return join_cards(cards), InlineKeyboardMarkup(buttons)
+
+    async def pending_orders_view(self, page=0):
+        from app.telegram.keyboards import build_pending_orders_keyboard
+        orders = sorted(await self.service.broker.get_pending_orders(), key=lambda o: o.ticket)
+        page = min(max(page, 0), max(0, (len(orders) - 1) // 5))
+        pages = max(1, (len(orders) + 4) // 5)
+        cards = [heading("⏳ Lệnh chờ", f"Trang {page + 1}/{pages} · {len(orders)} lệnh")]
+        cards += [pending_card(order) for order in orders[page * 5:page * 5 + 5]]
+        if not orders:
+            cards.append("Không có lệnh chờ.")
+        return join_cards(cards), build_pending_orders_keyboard(orders, page)
 
     async def health_view(self):
         from app.telegram.signal_listener import signal_listener
@@ -180,12 +214,13 @@ class TelegramConsoleMixin:
         task = getattr(self.service, "_sync_task", None)
         sync = bool(task and not task.done())
         last = format_vietnam_time(signal_listener.last_message_at, "%H:%M:%S %d/%m/%Y") if signal_listener.last_message_at else "Chưa nhận tin trong phiên này"
-        return (f"🏥 <b>Kết nối · {now_vietnam().strftime('%H:%M:%S %d/%m/%Y')}</b>\n"
-                f"MT5: {'✅ Kết nối' if connected else '❌ Mất kết nối'}\n"
-                f"Telegram nhận tín hiệu: {'✅ Kết nối' if listener else '❌ Chưa sẵn sàng'}\n"
-                f"Database: {'✅ Kết nối' if database else '❌ Không truy cập được'}\n"
-                f"Đồng bộ lệnh: {'✅ Đang chạy' if sync else '❌ Chưa chạy'}\n"
-                f"Tin gần nhất: {last}")
+        return join_cards([
+            heading("🏥 Kết nối hệ thống", now_vietnam().strftime('%H:%M:%S · %d/%m/%Y')),
+            section("KẾT NỐI", field("MT5", "✅ Kết nối" if connected else "❌ Mất kết nối"),
+                field("Telegram nhận tín hiệu", "✅ Kết nối" if listener else "❌ Chưa sẵn sàng"),
+                field("Database", "✅ Kết nối" if database else "❌ Không truy cập được")),
+            section("TÁC VỤ", field("Đồng bộ lệnh", "✅ Đang chạy" if sync else "❌ Chưa chạy"),
+                field("Tin gần nhất", last))])
 
     async def handle_console_callback(self, update, context, data: str) -> bool:
         query = update.callback_query
@@ -249,6 +284,18 @@ class TelegramConsoleMixin:
                 text, keyboard = self.prepare_config({key: value})
                 await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
             return True
+        if data.startswith("cfg_group_"):
+            from app.telegram.keyboards import CONFIG_SECTIONS
+            group = data[len("cfg_group_"):]
+            if group in CONFIG_SECTIONS:
+                text = heading(CONFIG_SECTIONS[group][0], "Chọn tham số để xem trước thay đổi")
+                if group == "sl":
+                    text += "\n\nHòa vốn dùng entry riêng từng lệnh.\nKhông tính trung bình hai entry."
+                elif group == "profit":
+                    text += "\n\nMột TP: đóng toàn bộ.\nTP1 + TP2: chốt theo tỷ lệ rồi giữ phần còn lại."
+                await query.edit_message_text(text, parse_mode=ParseMode.HTML,
+                    reply_markup=build_risk_config_keyboard(cfg, group))
+            return True
         if data == "cfg_breakeven_mode":
             await query.edit_message_text("Hòa vốn luôn dùng entry riêng từng lệnh. Quy tắc lấy giá trung bình đã được bỏ.")
             return True
@@ -267,7 +314,7 @@ class TelegramConsoleMixin:
                 await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
             else:
                 context.user_data["config_field"] = {"key": key, "expires": time.monotonic() + 300}
-                await query.message.reply_text(f"{CONFIG_FIELDS[key]} · Hiện tại: {value}\nNhập giá trị mới, hoặc gửi 'hủy'. Bot sẽ cho xem trước trước khi lưu.")
+                await query.message.reply_text(f"⚙️ {CONFIG_FIELDS[key]}\n\nHiện tại: {config_value(value)}\n\nNhập giá trị mới hoặc gửi ‘hủy’.\nBot sẽ cho xem trước trước khi lưu.")
             return True
         if data == "view_config_risk":
             await query.edit_message_text("⚙️ <b>Cài đặt</b>\nChọn mục cần sửa. Mọi thay đổi đều có bước xem trước và xác nhận.",
@@ -276,6 +323,9 @@ class TelegramConsoleMixin:
         if data.startswith("positions_page_") or data in {"view_positions", "positions_refresh"}:
             page = int(data.rsplit("_", 1)[1]) if data.startswith("positions_page_") else 0
             text, keyboard = await self.positions_view(page)
+        elif data == "view_orders" or data.startswith("orders_page_"):
+            page = int(data.rsplit("_", 1)[1]) if data.startswith("orders_page_") else 0
+            text, keyboard = await self.pending_orders_view(page)
         elif data.startswith("inbox_"):
             status, page = data[6:].rsplit("_", 1)
             if status not in {"ALL", "AWAITING_APPROVAL", "REJECTED", "UNKNOWN", "EXECUTED", "ERROR", "PARTIAL"}:
@@ -291,9 +341,12 @@ class TelegramConsoleMixin:
                 return True
             from app.telegram.keyboards import build_override_keyboard
             requests = entry["orders"]
-            text = "⚠️ <b>Quyết định thủ công</b>\n" + "\n".join(
-                f"{r.order_type} {escape(r.symbol)} · {r.volume} lot @ {r.price}" for r in requests.values())
-            text += "\nGiới hạn được phép vượt: " + escape(entry.get("allowed_rule") or "vùng giá/trượt giá")
+            text = join_cards([heading("⚠️ Duyệt lệnh thủ công", f"Tín hiệu #{signal_id}"),
+                *[section(f"{r.order_type} · {r.symbol}", field("Khối lượng", f"{number(r.volume)} lot"),
+                    field("Giá đặt", number(r.price, minimum=2), code=True),
+                    field("SL", number(r.sl, minimum=2), code=True), field("TP", number(r.tp, minimum=2), code=True))
+                  for r in requests.values()],
+                section("ĐIỀU KIỆN ĐƯỢC PHÉP VƯỢT", escape(entry.get("allowed_rule") or "Vùng giá / trượt giá"))])
             keyboard = build_override_keyboard(signal_id, len(requests) > 1)
         elif data in {"close_all_confirm", "cancel_all_orders"} or data.startswith(("close_", "cancel_", "partial_")):
             percentage = cfg.default_partial_close_percent
@@ -316,7 +369,9 @@ class TelegramConsoleMixin:
             payload = {"action": action, "tickets": tickets, "percentage": percentage}
             token = self.new_draft("action", payload)
             names = {"close": "Đóng vị thế", "cancel": "Hủy lệnh chờ", "partial": f"Chốt {percentage}%"}
-            text = f"⚠️ <b>{names[action]}</b>\nPhạm vi: {len(tickets)} ticket trên tài khoản hiện tại.\n" + escape(", ".join(map(str, tickets)))
+            text = join_cards([heading("⚠️ " + names[action], "Chưa thực thi"),
+                section("PHẠM VI", f"Phạm vi: {len(tickets)} ticket trên tài khoản hiện tại."),
+                section("TICKET ĐƯỢC CHỌN", "\n".join(f"• <code>#{t}</code>" for t in tickets) or "Không có lệnh phù hợp.")])
             keyboard = self.draft_keyboard(token, bool(tickets))
         else:
             return False

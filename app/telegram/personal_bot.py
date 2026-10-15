@@ -26,6 +26,7 @@ from telegram.ext import (
     filters,
 )
 
+from app.telegram.presentation import heading, section, field, money, join_cards
 from app.config.settings import settings
 from app.telegram.keyboards import (
     build_history_keyboard,
@@ -279,17 +280,11 @@ class PersonalTelegramBot(TelegramConsoleMixin):
     @admin_only
     async def cmd_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         acc = await self.service.broker.get_account_info()
-        msg = (
-            f"💰 <b>Số Dư Tài Khoản</b>\n"
-            f"━━━━━━━━━━━━━━━━\n\n"
-            f"<b>Số dư:</b> {acc.balance} {acc.currency}\n"
-            f"<b>Equity:</b> {acc.equity} {acc.currency}\n"
-            f"<b>Margin:</b> {acc.margin}\n"
-            f"<b>Khả dụng:</b> {acc.free_margin}\n"
-            f"<b>Đòn bẩy:</b> 1:{acc.leverage}\n"
-            f"<b>Server:</b> {acc.server}\n"
-            f"━━━━━━━━━━━━━━━━"
-        )
+        msg = join_cards([heading("💰 Tài khoản", f"#{acc.login} · {acc.server}"),
+            section("TÀI SẢN", field("Số dư", money(acc.balance, acc.currency)),
+                field("Equity", money(acc.equity, acc.currency))),
+            section("KÝ QUỸ", field("Đang sử dụng", money(acc.margin, acc.currency)),
+                field("Khả dụng", money(acc.free_margin, acc.currency)), field("Đòn bẩy", f"1:{acc.leverage}"))])
         if update.effective_message:
             await update.effective_message.reply_text(msg, parse_mode=ParseMode.HTML)
 
@@ -392,23 +387,17 @@ class PersonalTelegramBot(TelegramConsoleMixin):
         pf_val = stats["profit_factor"]
         pf_str = f"{pf_val:.2f}" if pf_val < 900 else "∞ (Chưa có lệnh thua)"
 
-        msg = (
-            f"📈 <b>Báo Cáo Hiệu Suất</b>\n"
-            f"━━━━━━━━━━━━━━━━\n"
-            f"⏱ Kỳ thống kê: {days} ngày\n\n"
-            f"<b>Tổng lệnh:</b> {stats['total_trades']}\n"
-            f"✅ Thắng: {stats['win_trades']} (<b>{stats['win_rate']}%</b>)\n"
-            f"❌ Thua: {stats['loss_trades']}\n"
-            f"⚪ Hòa vốn: {stats['breakeven_trades']}\n\n"
-            f"━━━━━━━━━━━━━━━━\n"
-            f"<b>Tổng lãi:</b> +${stats['total_profit']:.2f}\n"
-            f"<b>Tổng lỗ:</b> -${abs(stats['total_loss']):.2f}\n"
-            f"<b>Profit Factor:</b> <code>{pf_str}</code>\n"
-            f"<b>Lãi ròng:</b> {pnl_icon} <b>{pnl_sign}${net_pnl:.2f}</b>\n\n"
-            f"━━━━━━━━━━━━━━━━\n"
-            f"<b>Thắng lớn nhất:</b> +${stats['best_trade']:.2f}\n"
-            f"<b>Thua lớn nhất:</b> ${stats['worst_trade']:.2f}"
-        )
+        currency = await self.display_currency()
+        msg = join_cards([
+            heading("📈 Báo cáo hiệu suất", f"Kỳ thống kê: {days} ngày"),
+            section("KẾT QUẢ", f"{pnl_icon} <b>Lãi ròng: {escape(money(net_pnl, currency, signed=True))}</b>"),
+            section("GIAO DỊCH", field("Tổng số", stats['total_trades']),
+                field("Thắng", stats['win_trades']), field("Thua", stats['loss_trades']),
+                field("Hòa vốn", stats['breakeven_trades']), field("Tỷ lệ thắng", f"{stats['win_rate']}%")),
+            section("LÃI VÀ LỖ", field("Tổng lãi", money(stats['total_profit'], currency, signed=True)),
+                field("Tổng lỗ", money(stats['total_loss'], currency, signed=True)), field("Profit Factor", pf_str)),
+            section("LỆNH NỔI BẬT", field("Lãi lớn nhất", money(stats['best_trade'], currency, signed=True)),
+                field("Lỗ lớn nhất", money(stats['worst_trade'], currency, signed=True)))])
         keyboard = build_stats_keyboard(days)
         return msg, keyboard
 
@@ -851,7 +840,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
                 "Chọn tham số bên dưới để nhập giá trị mới, xem trước rồi xác nhận.\n"
                 "Giới hạn số lệnh bao gồm vị thế đang mở và lệnh chờ.\n"
                 "Giới hạn lỗ ngày tính toàn tài khoản theo ngày Việt Nam.\n\n"
-                + self.service.management_policy_description() + "\n\n" +
+                "Các tham số được chia theo nhóm bên dưới.\n\n"
                 "Nâng cao: <code>/config set tên_tham_số giá_trị</code> cũng có bước xem trước.",
                 parse_mode=ParseMode.HTML, reply_markup=build_risk_config_keyboard(cfg))
         except Exception as e:
@@ -1159,21 +1148,6 @@ class PersonalTelegramBot(TelegramConsoleMixin):
                 await query.message.reply_text("Không lưu được trạng thái; bot vẫn giữ cấu hình trước đó.")
             text, keyboard = await self.status_view()
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
-        elif data == "view_orders":
-            from app.telegram.keyboards import build_pending_orders_keyboard
-            orders = await self.service.broker.get_pending_orders()
-            if not orders:
-                keyboard = build_status_keyboard(cfg.enabled)
-                await query.edit_message_text("⏳ <b>Không có lệnh chờ nào.</b>", parse_mode=ParseMode.HTML, reply_markup=keyboard)
-            else:
-                lines = ["⏳ <b>Danh Sách Lệnh Chờ</b>\n━━━━━━━━━━━━━━━━\n"]
-                for o in orders:
-                    lines.append(
-                        f"• <b>{o.symbol}</b> {o.order_type} {o.volume} lot @ <code>{o.price}</code>\n"
-                        f"  SL: {o.sl or '—'} | TP: {o.tp or '—'} | Ticket: <code>{o.ticket}</code>"
-                    )
-                keyboard = build_pending_orders_keyboard(orders)
-                await query.edit_message_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=keyboard)
         elif data == "view_history":
             msg, keyboard = await self._format_history_message(7)
             await query.edit_message_text(msg, parse_mode=ParseMode.HTML, reply_markup=keyboard)

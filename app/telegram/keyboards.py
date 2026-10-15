@@ -42,11 +42,11 @@ def build_status_keyboard(bot_enabled: bool) -> InlineKeyboardMarkup:
 def build_positions_keyboard(positions: list[PositionInfo], page: int = 0, percentage=50) -> InlineKeyboardMarkup:
     """Build action buttons for each active position (Close / Breakeven / Partial)."""
     buttons = []
-    for pos in positions[page * 5:page * 5 + 5]:
+    for index, pos in enumerate(positions[page * 5:page * 5 + 5], start=page * 5 + 1):
         row = [
-            InlineKeyboardButton(f"❌ Đóng {pos.ticket}", callback_data=f"close_{pos.ticket}"),
-            InlineKeyboardButton(f"✂️ Chốt {percentage}%", callback_data=f"partial_{pos.ticket}_{percentage}"),
-            InlineKeyboardButton(f"🎯 BE", callback_data=f"be_{pos.ticket}"),
+            InlineKeyboardButton(f"{index}. Đóng #{pos.ticket}", callback_data=f"close_{pos.ticket}"),
+            InlineKeyboardButton(f"{index}. Chốt {percentage}%", callback_data=f"partial_{pos.ticket}_{percentage}"),
+            InlineKeyboardButton(f"{index}. Hòa vốn", callback_data=f"be_{pos.ticket}"),
         ]
         buttons.append(row)
 
@@ -68,8 +68,22 @@ def build_positions_keyboard(positions: list[PositionInfo], page: int = 0, perce
     return InlineKeyboardMarkup(buttons)
 
 
-def build_risk_config_keyboard(config: RiskConfig) -> InlineKeyboardMarkup:
+CONFIG_SECTIONS = {
+    "entry": ("🎯 Vào lệnh", {"enabled", "enable_dual_entry", "max_slippage_entry", "lot_min_entry", "lot_max_entry", "default_lot"}),
+    "sl": ("🛡 SL và hòa vốn", {"breakeven_offset_price", "breakeven_only_improve", "auto_breakeven_on_partial"}),
+    "profit": ("✂️ Chốt lời và nhánh lệnh", {"default_partial_close_percent", "tp1_enabled", "tp1_min_volume_action", "auto_cancel_pending_on_full_close", "allow_multiple_partial_closes"}),
+    "risk": ("⚖️ Giới hạn tài khoản", {"require_sl", "max_open_positions", "max_daily_loss_percent"}),
+    "signal": ("📥 Xử lý tín hiệu", {"generic_partial_uses_default", "require_explicit_close", "signal_expire_seconds"}),
+}
+
+
+def build_risk_config_keyboard(config: RiskConfig, group: str | None = None) -> InlineKeyboardMarkup:
     """Build interactive toggle & setting buttons for /config risk."""
+    if group not in CONFIG_SECTIONS:
+        return InlineKeyboardMarkup([
+            *[[InlineKeyboardButton(label, callback_data=f"cfg_group_{key}")] for key, (label, _) in CONFIG_SECTIONS.items()],
+            [InlineKeyboardButton("Tổng quan", callback_data="status_refresh")],
+        ])
     fields = [
         ("enabled", "Mở lệnh mới"), ("require_sl", "Bắt buộc SL"),
         ("enable_dual_entry", "Hai đầu vùng giá"), ("max_slippage_entry", "Dung sai giá"),
@@ -85,14 +99,16 @@ def build_risk_config_keyboard(config: RiskConfig) -> InlineKeyboardMarkup:
     ]
     buttons = []
     for key, label in fields:
+        if key not in CONFIG_SECTIONS[group][1]:
+            continue
         value = getattr(config, key)
         if isinstance(value, bool):
             value = "Bật" if value else "Tắt"
         elif key == "tp1_min_volume_action":
             value = "Dời SL" if value == "breakeven" else "Bỏ qua"
         buttons.append(InlineKeyboardButton(f"{label}: {value}", callback_data=f"cfg_{key}"))
-    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
-    rows.append([InlineKeyboardButton("Tổng quan", callback_data="status_refresh")])
+    rows = [[button] for button in buttons]
+    rows.append([InlineKeyboardButton("← Nhóm cài đặt", callback_data="view_config_risk")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -144,18 +160,25 @@ def build_override_keyboard(signal_id: int, has_dual: bool = True) -> InlineKeyb
     return InlineKeyboardMarkup(keyboard)
 
 
-def build_pending_orders_keyboard(orders: list[Any]) -> InlineKeyboardMarkup:
+def build_pending_orders_keyboard(orders: list[Any], page: int = 0) -> InlineKeyboardMarkup:
     """Build keyboard for managing pending orders."""
     keyboard = []
     # Add a cancel button for each pending order
-    for o in orders:
-        keyboard.append([InlineKeyboardButton(f"❌ Cancel #{o.ticket} ({o.symbol})", callback_data=f"cancel_{o.ticket}")])
+    for o in orders[page * 5:page * 5 + 5]:
+        keyboard.append([InlineKeyboardButton(f"❌ Hủy #{o.ticket} ({o.symbol})", callback_data=f"cancel_{o.ticket}")])
         
     if orders:
         keyboard.append([InlineKeyboardButton("❌ Hủy tất cả lệnh chờ", callback_data="cancel_all_orders")])
         
+    nav = []
+    if page:
+        nav.append(InlineKeyboardButton("← Trước", callback_data=f"orders_page_{page - 1}"))
+    if len(orders) > (page + 1) * 5:
+        nav.append(InlineKeyboardButton("Sau →", callback_data=f"orders_page_{page + 1}"))
+    if nav:
+        keyboard.append(nav)
     keyboard.append([
-        InlineKeyboardButton("🔄 Nạp lại", callback_data="view_orders"),
+        InlineKeyboardButton("🔄 Cập nhật", callback_data=f"orders_page_{page}"),
         InlineKeyboardButton("🔙 Tổng quan", callback_data="status_refresh")
     ])
     return InlineKeyboardMarkup(keyboard)
