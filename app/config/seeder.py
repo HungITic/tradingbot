@@ -63,6 +63,13 @@ INITIAL_BOT_CONFIGS: list[dict[str, Any]] = [
             "default_partial_close_percent": 50.0,
             "auto_breakeven_on_partial": True,
             "breakeven_offset_price": 0.0,
+            "breakeven_mode": "ticket",
+            "breakeven_only_improve": True,
+            "require_explicit_close": True,
+            "generic_partial_uses_default": True,
+            "tp1_enabled": True,
+            "tp1_min_volume_action": "breakeven",
+            "auto_cancel_pending_on_full_close": True,
         },
         "description": "Position management and TP milestone automation",
     },
@@ -138,6 +145,9 @@ async def _seed_with_session(session: AsyncSession) -> dict[str, int]:
                 if k not in val:
                     val[k] = v
                     changed = True
+                elif k == "breakeven_mode" and val[k] != "ticket":
+                    val[k] = "ticket"
+                    changed = True
                 elif k == "allowed_symbols" and isinstance(val[k], list) and isinstance(v, list):
                     # Ensure all default allowed symbols are included
                     merged_syms = list(dict.fromkeys(val[k] + v))
@@ -169,12 +179,8 @@ async def _seed_with_session(session: AsyncSession) -> dict[str, int]:
             session.add(r)
             rules_seeded += 1
             logger.info("seeded_management_rule", keyword=rule.keyword, action=rule.action_type.value)
-        else:
-            # If exists but disabled or needs update, ensure it's enabled
-            if not existing_rule.enabled:
-                existing_rule.enabled = True
-                rules_seeded += 1
-                logger.info("re_enabled_management_rule", keyword=rule.keyword)
+        # Existing rules, including disabled rules, are user configuration.
+        # Startup must not silently re-enable or overwrite them.
 
     await session.flush()
     logger.info("seed_completed", configs_updated=configs_seeded, rules_updated=rules_seeded)

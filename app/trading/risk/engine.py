@@ -60,7 +60,7 @@ class RiskEngine:
 
             if result.status == RiskStatus.REJECTED:
                 is_approved = False
-                rejection_reason = f"[{rule.name}] {result.reason}"
+                rejection_reason = f"[{result.rule_name}] {result.reason}"
                 logger.warning(
                     "risk_check_rejected",
                     rule=rule.name,

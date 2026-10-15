@@ -6,9 +6,9 @@ from __future__ import annotations
 
 from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class RiskStatus(str, Enum):
@@ -56,6 +56,15 @@ class RiskConfig(BaseModel):
     breakeven_offset_price: Decimal = Decimal("0.0")
     allow_multiple_partial_closes: bool = False  # False = Chặn chốt từng phần lặp lại cho cùng 1 vị thế
 
+    # Explicit position policy, shared by TP1, commands and Telegram buttons.
+    breakeven_mode: Literal["ticket"] = "ticket"
+    breakeven_only_improve: bool = True
+    require_explicit_close: bool = True
+    generic_partial_uses_default: bool = True
+    tp1_enabled: bool = True
+    tp1_min_volume_action: Literal["breakeven", "skip"] = "breakeven"
+    auto_cancel_pending_on_full_close: bool = True
+
     # Dual Entry Setup Rules (Min Entry + Max Entry)
     enable_dual_entry: bool = True
     lot_min_entry: Decimal = Decimal("0.01")
@@ -65,28 +74,46 @@ class RiskConfig(BaseModel):
     # Broker Server Timezone Offset
     broker_utc_offset_hours: int = 3  # Chênh lệch UTC của sàn (PUPrime EET/EEST: +3 hè, +2 đông)
 
+    @model_validator(mode="after")
+    def check_limits(self):
+        lots = (self.min_lot, self.max_lot, self.default_lot, self.lot_min_entry, self.lot_max_entry)
+        if any(not value.is_finite() or value <= 0 for value in lots):
+            raise ValueError("Lot phải là số hữu hạn lớn hơn 0")
+        if self.min_lot > self.max_lot:
+            raise ValueError("Lot tối thiểu không được lớn hơn lot tối đa")
+        if any(not self.min_lot <= v <= self.max_lot for v in lots[2:]):
+            raise ValueError("Lot vào lệnh phải nằm trong giới hạn min_lot/max_lot")
+        if self.max_open_positions < 1 or self.signal_expire_seconds < 1 or self.duplicate_timeout_seconds < 0:
+            raise ValueError("Số vị thế và thời hạn phải dương; thời gian lọc trùng không được âm")
+        if not self.max_daily_loss_percent.is_finite() or not 0 < self.max_daily_loss_percent <= 100:
+            raise ValueError("Giới hạn lỗ ngày phải lớn hơn 0 và không vượt 100%")
+        if not self.default_partial_close_percent.is_finite() or not 0 < self.default_partial_close_percent < 100:
+            raise ValueError("Chốt một phần phải lớn hơn 0 và nhỏ hơn 100%")
+        if not self.max_slippage_entry.is_finite() or self.max_slippage_entry < 0:
+            raise ValueError("Dung sai giá phải hữu hạn và không âm")
+        if not self.breakeven_offset_price.is_finite() or self.breakeven_offset_price < 0 or not -12 <= self.broker_utc_offset_hours <= 14:
+            raise ValueError("Offset không hợp lệ")
+        if not self.allowed_symbols or any(not str(s).strip() for s in self.allowed_symbols):
+            raise ValueError("Phải có ít nhất một mã giao dịch hợp lệ")
+        return self
+
+    def with_updates(self, updates: dict[str, Any]) -> "RiskConfig":
+        unknown = set(updates) - set(type(self).model_fields)
+        if unknown:
+            raise ValueError("Cấu hình không tồn tại: " + ", ".join(sorted(unknown)))
+        values = self.model_dump()
+        values.update(updates)
+        if isinstance(values["allowed_symbols"], str):
+            values["allowed_symbols"] = [s.strip().upper() for s in values["allowed_symbols"].split(",") if s.strip()]
+        return type(self).model_validate(values)
+
     def update_field(self, key: str, value: Any) -> bool:
-        """Update any configuration field with validation."""
-        if hasattr(self, key):
-            try:
-                current_val = getattr(self, key)
-                if isinstance(current_val, Decimal):
-                    setattr(self, key, Decimal(str(value)))
-                elif isinstance(current_val, bool):
-                    setattr(self, key, str(value).lower() in ("true", "1", "yes", "on"))
-                elif isinstance(current_val, int):
-                    setattr(self, key, int(value))
-                    if key == "broker_utc_offset_hours":
-                        from app.core.timezone import set_broker_utc_offset_hours
-                        set_broker_utc_offset_hours(int(value))
-                elif isinstance(current_val, list):
-                    if isinstance(value, str):
-                        setattr(self, key, [s.strip().upper() for s in value.split(",") if s.strip()])
-                    else:
-                        setattr(self, key, list(value))
-                else:
-                    setattr(self, key, value)
-                return True
-            except Exception:
-                return False
-        return False
+        try:
+            candidate = self.with_updates({key: value})
+        except (ValueError, TypeError):
+            return False
+        setattr(self, key, getattr(candidate, key))
+        if key == "broker_utc_offset_hours":
+            from app.core.timezone import set_broker_utc_offset_hours
+            set_broker_utc_offset_hours(candidate.broker_utc_offset_hours)
+        return True

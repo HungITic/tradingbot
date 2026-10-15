@@ -1,5 +1,7 @@
 # 📘 Hướng Dẫn Sử Dụng & Kịch Bản Test — Trading Bot V1
 
+> **Cập nhật 15/10/2026:** Xem [hướng dẫn nâng cấp](upgrade_2026_10_15.md) cho menu mới, bước xem trước/xác nhận, giới hạn thực thi và chống xử lý trùng. Các ví dụ thao tác bên dưới mô tả V1; những hành vi mới trong hướng dẫn nâng cấp được ưu tiên.
+
 Tài liệu này hướng dẫn chi tiết cách vận hành, cấu hình và thực hiện các kịch bản kiểm thử (Test Cases) toàn diện từ Telegram Group tín hiệu đến MetaTrader 5 (Exness Demo).
 
 ---

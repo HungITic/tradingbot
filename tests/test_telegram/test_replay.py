@@ -2,6 +2,7 @@
 Unit tests for Telegram replay feature and message link notification flow.
 """
 
+from datetime import datetime, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -21,6 +22,8 @@ from app.trading.service import TradingService
 def mock_db_session():
     mock_session = AsyncMock()
     mock_session.add = MagicMock()
+    mock_session.execute.return_value = MagicMock()
+    mock_session.execute.return_value.scalar_one_or_none.return_value = 1
     mock_session.flush = AsyncMock()
     mock_session.commit = AsyncMock()
     mock_session.rollback = AsyncMock()
@@ -55,6 +58,7 @@ def mock_broker():
     from datetime import datetime, timezone
 
     broker.get_positions = AsyncMock(return_value=[])
+    broker.get_pending_orders = AsyncMock(return_value=[])
     broker.get_history_deals = AsyncMock(return_value=[])
     broker.get_tick = AsyncMock(
         return_value=TickInfo(
@@ -79,7 +83,7 @@ def mock_broker():
 @pytest.mark.asyncio
 async def test_notifications_include_message_link(mock_broker):
     """Test that all notifications emitted during signal processing include the original message link."""
-    service = TradingService(broker=mock_broker)
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     notifications = []
 
     async def mock_notify(msg: str, reply_markup=None):
@@ -123,7 +127,7 @@ async def test_slippage_warning_includes_message_link(mock_broker):
             time=datetime.now(timezone.utc),
         )
     )
-    service = TradingService(broker=mock_broker)
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     notifications = []
 
     async def mock_notify(msg: str, reply_markup=None):
@@ -161,7 +165,7 @@ async def test_max_entry_exceeded_warning_includes_message_link(mock_broker):
             time=datetime.now(timezone.utc),
         )
     )
-    service = TradingService(broker=mock_broker)
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     notifications = []
 
     async def mock_notify(msg: str, reply_markup=None):
@@ -200,6 +204,7 @@ async def test_fetch_message_by_link_in_signal_listener():
     mock_msg.is_reply = False
     mock_msg.reply_to_msg_id = None
     mock_msg.reply_to = None
+    mock_msg.date = datetime.now(timezone.utc)
 
     mock_chat = MagicMock()
     mock_chat.username = "MegaLodonGOLDForex"
@@ -209,7 +214,7 @@ async def test_fetch_message_by_link_in_signal_listener():
     listener.client = mock_client
 
     link = "https://t.me/MegaLodonGOLDForex/1241"
-    raw_text, msg_id, chat_id, canonical_link, is_reentry, reply_to_msg_id = (
+    raw_text, msg_id, chat_id, canonical_link, is_reentry, reply_to_msg_id, signal_time = (
         await listener.fetch_message_by_link(link)
     )
 
@@ -226,6 +231,7 @@ async def test_cmd_replay_and_raw_link_handling():
     """Test /replay command and direct text paste in PersonalTelegramBot."""
     mock_service = MagicMock(spec=TradingService)
     mock_service.process_raw_message = AsyncMock()
+    mock_service.preview_signal = AsyncMock(return_value={"text": "Xem trước", "can_execute": True})
 
     bot = PersonalTelegramBot(service=mock_service)
 
@@ -247,6 +253,8 @@ async def test_cmd_replay_and_raw_link_handling():
 
     context = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
     context.args = ["https://t.me/MegaLodonGOLDForex/1241"]
+    context.user_data = {}
+    signal_time = datetime.now(timezone.utc)
 
     with patch(
         "app.telegram.signal_listener.signal_listener.fetch_message_by_link",
@@ -258,23 +266,26 @@ async def test_cmd_replay_and_raw_link_handling():
                 "https://t.me/MegaLodonGOLDForex/1241",
                 False,
                 None,
+                signal_time,
             )
         ),
     ):
         await bot.cmd_replay(update, context)
 
-        mock_service.process_raw_message.assert_awaited_once_with(
-            "BUY GOLD 2650 SL 2640 TP 2660",
+        mock_service.preview_signal.assert_awaited_once_with(
+            raw_text="BUY GOLD 2650 SL 2640 TP 2660",
             is_reentry=False,
             message_id=1241,
             chat_id=-1001904907955,
             message_link="https://t.me/MegaLodonGOLDForex/1241",
             reply_to_msg_id=None,
+            signal_time=signal_time,
         )
         assert status_message.edit_text.called
 
     # Test raw text paste directly without /replay
-    mock_service.process_raw_message.reset_mock()
+    mock_service.process_raw_message.assert_not_awaited()
+    mock_service.preview_signal.reset_mock()
     incoming_message.text = "https://t.me/MegaLodonGOLDForex/1241"
 
     with patch(
@@ -287,16 +298,18 @@ async def test_cmd_replay_and_raw_link_handling():
                 "https://t.me/MegaLodonGOLDForex/1241",
                 False,
                 None,
+                signal_time,
             )
         ),
     ):
         await bot.handle_text_message(update, context)
 
-        mock_service.process_raw_message.assert_awaited_once_with(
-            "BUY GOLD 2650 SL 2640 TP 2660",
+        mock_service.preview_signal.assert_awaited_once_with(
+            raw_text="BUY GOLD 2650 SL 2640 TP 2660",
             is_reentry=False,
             message_id=1241,
             chat_id=-1001904907955,
             message_link="https://t.me/MegaLodonGOLDForex/1241",
             reply_to_msg_id=None,
+            signal_time=signal_time,
         )

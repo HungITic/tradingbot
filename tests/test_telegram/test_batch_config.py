@@ -57,7 +57,7 @@ def test_extract_config_pairs_single_standard():
 @pytest.mark.asyncio
 async def test_service_update_config_keys():
     mock_broker = AsyncMock()
-    service = TradingService(broker=mock_broker)
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     service.save_risk_config_to_db = AsyncMock(return_value=True)
 
     updates = {
@@ -80,7 +80,7 @@ async def test_service_update_config_keys():
 @pytest.mark.asyncio
 async def test_cmd_config_batch_execution():
     mock_broker = AsyncMock()
-    service = TradingService(broker=mock_broker)
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     service.save_risk_config_to_db = AsyncMock(return_value=True)
 
     bot = PersonalTelegramBot(service=service)
@@ -106,9 +106,11 @@ async def test_cmd_config_batch_execution():
     # Check response message
     message.reply_text.assert_awaited_once()
     reply_call = message.reply_text.call_args[0][0]
-    assert "Đã cập nhật 5 cấu hình vào DB" in reply_call
-    assert "lot_min_entry" in reply_call
-    assert "lot_max_entry" in reply_call
-    assert "default_lot" in reply_call
+    assert "Xem trước thay đổi" in reply_call
+    service.save_risk_config_to_db.assert_not_awaited()
+    assert service.risk_config.default_lot == Decimal("0.01")
+    assert "Lot nhánh thứ nhất" in reply_call
+    assert "Lot nhánh thứ hai" in reply_call
+    assert "Lot mặc định" in reply_call
     assert "min_lot" in reply_call
     assert "max_lot" in reply_call

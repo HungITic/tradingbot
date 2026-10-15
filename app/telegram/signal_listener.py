@@ -8,6 +8,8 @@ and routes them through the TradingService pipeline.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
+from html import escape
 from typing import Any
 
 import structlog
@@ -26,6 +28,7 @@ class TelegramSignalListener:
         self.service = service or trading_service
         self.client: TelegramClient | None = None
         self._running = False
+        self.last_message_at: datetime | None = None
 
     async def initialize(self) -> None:
         """Create the Telethon client instance."""
@@ -69,6 +72,7 @@ class TelegramSignalListener:
 
         @self.client.on(events.NewMessage(chats=chats_filter))
         async def on_new_signal_message(event: events.NewMessage.Event) -> None:
+            self.last_message_at = event.message.date
             raw_text = event.raw_text
             chat_id = event.chat_id
             msg_id = event.id
@@ -115,9 +119,22 @@ class TelegramSignalListener:
                     chat_id=chat_id,
                     message_link=message_link,
                     reply_to_msg_id=reply_to_msg_id,
+                    signal_time=event.message.date,
                 )
             except Exception as e:
                 logger.exception("signal_processing_error", error=str(e), message_id=msg_id)
+
+        @self.client.on(events.MessageEdited(chats=chats_filter))
+        async def on_edited_signal(event):
+            # An edit must never create a second order or silently alter an existing trade.
+            self.last_message_at = event.message.edit_date or event.message.date
+            from app.telegram.utils import construct_telegram_message_link
+            chat = await event.get_chat()
+            link = construct_telegram_message_link(event.chat_id, event.id, username=getattr(chat, "username", None))
+            await self.service.notify(self.service.format_notification(
+                "✏️ <b>Tín hiệu đã được sửa — cần xem lại</b>\n"
+                + escape(event.raw_text[:600])
+                + "\nMở link trong bot để xem trước. Lệnh đang chạy chưa được thay đổi.", link))
 
         self._running = True
         logger.info(
@@ -128,10 +145,10 @@ class TelegramSignalListener:
 
     async def fetch_message_by_link(
         self, link: str
-    ) -> tuple[str, int, int, str, bool, int | None]:
+    ) -> tuple[str, int, int, str, bool, int | None, datetime]:
         """
         Fetch message content and metadata from a Telegram link.
-        Returns: (raw_text, message_id, chat_id, canonical_link, is_reentry, reply_to_msg_id)
+        Returns: (raw_text, message_id, chat_id, canonical_link, is_reentry, reply_to_msg_id, sent_at)
         """
         from app.telegram.utils import construct_telegram_message_link, parse_telegram_message_link
 
@@ -194,7 +211,9 @@ class TelegramSignalListener:
         username = getattr(chat, "username", None) if chat else (entity if isinstance(entity, str) else None)
         canonical_link = construct_telegram_message_link(chat_id, msg_id, username=username) or link
 
-        return raw_text, msg_id, chat_id, canonical_link, is_reentry, reply_to_msg_id
+        if not isinstance(msg.date, datetime) or msg.date.tzinfo is None:
+            raise ValueError("Không xác định được thời gian gốc của tín hiệu")
+        return raw_text, msg_id, chat_id, canonical_link, is_reentry, reply_to_msg_id, msg.date
 
     async def stop(self) -> None:
         """Gracefully disconnect the Telethon client."""

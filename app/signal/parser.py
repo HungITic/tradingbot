@@ -9,6 +9,7 @@ from typing import Tuple
 
 from app.signal.models import (
     MessageType,
+    ManagementType,
     OrderAction,
     ParsedNewOrder,
     ParsedSignal,
@@ -143,6 +144,12 @@ class SignalParser:
         clean_text = re.sub(r"[*`]", "", raw_message).strip()
         lines = [line.strip() for line in clean_text.splitlines() if line.strip()]
 
+        # Ambiguous, negated and conditional instructions require human review.
+        if re.search(r"(?i)\b(?:chưa|không|đừng|khoan|nếu|chờ\s+xác\s+nhận|do\s+not|don't|if)\b", clean_text):
+            return ParsedSignal(message_type=MessageType.UNKNOWN, raw_message=clean_text,
+                                metadata={"reason": "Tin có phủ định hoặc điều kiện; không tự động thực thi"},
+                                parser_version=PARSER_VERSION)
+
         # 1. Try matching NEW_ORDER pattern
         action = None
         action_match = ACTION_REGEX.search(clean_text)
@@ -211,6 +218,15 @@ class SignalParser:
         # 2. Try matching POSITION_MANAGEMENT keywords
         actions = self.rule_engine.match_actions(clean_text)
         if actions:
+            kinds = {a.action_type for a in actions}
+            if ManagementType.CLOSE in kinds and len(kinds) > 1:
+                return ParsedSignal(message_type=MessageType.UNKNOWN, raw_message=clean_text,
+                    metadata={"reason": "Lệnh đóng toàn bộ xung đột với hành động quản lý khác; cần làm rõ"},
+                    parser_version=PARSER_VERSION)
+            stops = [a for a in actions if a.action_type in {ManagementType.MOVE_SL, ManagementType.BREAKEVEN}]
+            if len(stops) > 1:
+                return ParsedSignal(message_type=MessageType.UNKNOWN, raw_message=clean_text,
+                    metadata={"reason": "Có nhiều đích SL; cần làm rõ"}, parser_version=PARSER_VERSION)
             symbol, _ = self.detect_symbol(clean_text)
             return ParsedSignal(
                 message_type=MessageType.POSITION_MANAGEMENT,

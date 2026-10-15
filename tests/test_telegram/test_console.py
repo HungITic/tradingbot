@@ -1,0 +1,176 @@
+"""Behavioral tests for preview/confirmation and paginated management."""
+import time
+from datetime import datetime, timezone
+from decimal import Decimal as D
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from app.broker.base import PositionInfo, SymbolInfo, OrderResult
+from app.telegram.personal_bot import PersonalTelegramBot
+from app.trading.risk import RiskConfig
+from app.trading.service import TradingService
+
+
+@pytest.fixture
+def bot():
+    broker = AsyncMock()
+    service = TradingService(broker=broker, risk_config=RiskConfig())
+    service.save_risk_config_to_db = AsyncMock(return_value=True)
+    service.process_raw_message = AsyncMock()
+    service.position_orders = AsyncMock(return_value={})
+    service.management_history = AsyncMock(return_value=(set(), set()))
+    service._insert_management_action = AsyncMock()
+    service.broker.get_positions.return_value = []
+    service.broker.get_symbol_info.return_value = SymbolInfo('XAUUSD', 2, D('.01'), D('.01'), D('100'), D('.01'), D('100'))
+    return PersonalTelegramBot(service)
+
+
+def callback():
+    query = SimpleNamespace(edit_message_text=AsyncMock(), message=SimpleNamespace(reply_text=AsyncMock()))
+    return SimpleNamespace(callback_query=query), SimpleNamespace(user_data={})
+
+
+def position(ticket, volume='.02'):
+    return PositionInfo(ticket, 'XAUUSD', D(volume), D('2650'), D('2655'), D('2640'), D('2670'), D('5'), D('0'), D('0'), 'BUY', datetime.now(timezone.utc))
+
+
+@pytest.mark.asyncio
+async def test_config_needs_confirmation_and_is_single_use(bot):
+    text, keyboard = bot.prepare_config({'default_lot': '.02'})
+    assert '0.01' in text and '0.02' in text
+    assert bot.service.risk_config.default_lot == D('.01')
+    bot.service.save_risk_config_to_db.assert_not_awaited()
+    update, context = callback()
+    data = keyboard.inline_keyboard[0][0].callback_data
+    await bot.handle_console_callback(update, context, data)
+    assert bot.service.risk_config.default_lot == D('.02')
+    await bot.handle_console_callback(update, context, data)
+    bot.service.save_risk_config_to_db.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stale_config_preview_does_not_overwrite_newer_setting(bot):
+    _, keyboard = bot.prepare_config({'default_lot': '.02'})
+    bot.service.risk_config.max_open_positions = 2
+    update, context = callback()
+    await bot.handle_console_callback(update, context, keyboard.inline_keyboard[0][0].callback_data)
+    assert bot.service.risk_config.default_lot == D('.01')
+    bot.service.save_risk_config_to_db.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_expired_or_cancelled_signal_preview_never_executes(bot):
+    update, context = callback()
+    token = bot.new_draft('signal', {'raw_text': 'BUY GOLD'})
+    bot._drafts[token]['expires'] = time.monotonic() - 1
+    await bot.handle_console_callback(update, context, f'draft_ok_{token}')
+    token = bot.new_draft('signal', {'raw_text': 'BUY GOLD'})
+    await bot.handle_console_callback(update, context, f'draft_no_{token}')
+    await bot.handle_console_callback(update, context, f'draft_ok_{token}')
+    bot.service.process_raw_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_confirm_signal_routes_through_checks_once(bot):
+    update, context = callback()
+    payload = {'raw_text': 'BUY GOLD', 'signal_time': datetime.now(timezone.utc)}
+    token = bot.new_draft('signal', payload)
+    await bot.handle_console_callback(update, context, f'draft_ok_{token}')
+    await bot.handle_console_callback(update, context, f'draft_ok_{token}')
+    bot.service.process_raw_message.assert_awaited_once_with(**payload)
+
+
+@pytest.mark.asyncio
+async def test_close_all_button_only_stages_exact_ticket_list(bot):
+    update, context = callback()
+    bot.service.broker.get_positions.return_value = [position(1), position(2)]
+    await bot.handle_console_callback(update, context, 'close_all_confirm')
+    bot.service.broker.close_position.assert_not_awaited()
+    assert list(bot._drafts.values())[0]['payload']['tickets'] == [1, 2]
+    assert '2 ticket' in update.callback_query.edit_message_text.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_partial_close_never_turns_into_full_close_at_minimum_volume(bot):
+    bot.service.broker.get_positions.return_value = [position(1, '.01')]
+    results = await bot.service.partial_close_positions(ticket=1, percentage=D('50'))
+    assert not results[0][1].success
+    bot.service.broker.close_position.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_partial_close_honors_broker_step_and_exact_ticket(bot):
+    bot.service.broker.get_positions.return_value = [position(1, '.05'), position(2, '.05')]
+    bot.service.broker.close_position.return_value = OrderResult(True, ticket=1)
+    await bot.service.partial_close_positions(ticket=1, percentage=D('50'))
+    bot.service.broker.close_position.assert_awaited_once_with(1, D('.02'))
+
+
+@pytest.mark.asyncio
+async def test_every_position_is_accessible_with_matching_page_buttons(bot):
+    bot.service.broker.get_positions.return_value = [position(i) for i in range(1, 13)]
+    text, keyboard = await bot.positions_view(2)
+    assert '#11' in text and '#12' in text and '#1\n' not in text
+    data = [b.callback_data for row in keyboard.inline_keyboard for b in row]
+    assert 'close_11' in data and 'close_12' in data
+    assert 'close_1' not in data
+    assert 'positions_page_1' in data
+
+
+@pytest.mark.asyncio
+async def test_failed_config_save_reports_failure_and_keeps_old_values(bot):
+    bot.service.save_risk_config_to_db.return_value = False
+    _, keyboard = bot.prepare_config({'default_lot': '.02'})
+    update, context = callback()
+    await bot.handle_console_callback(update, context, keyboard.inline_keyboard[0][0].callback_data)
+    assert bot.service.risk_config.default_lot == D('.01')
+    assert 'Không lưu được' in update.callback_query.edit_message_text.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_health_never_labels_disconnected_listener_ready(bot):
+    from unittest.mock import patch
+    from contextlib import asynccontextmanager
+    from app.telegram.signal_listener import TelegramSignalListener
+    listener = TelegramSignalListener(service=bot.service)
+    listener._running = True
+    listener.client = MagicMock()
+    listener.client.is_connected.return_value = False
+    bot.service.broker.is_connected.return_value = False
+    @asynccontextmanager
+    async def unavailable():
+        raise RuntimeError('DB offline')
+        yield
+    with patch('app.telegram.signal_listener.signal_listener', listener), patch('app.config.database.get_session', unavailable):
+        text = await bot.health_view()
+    assert 'MT5: ❌' in text
+    assert 'Telegram nhận tín hiệu: ❌' in text
+    assert 'Database: ❌' in text
+    assert 'Đồng bộ lệnh: ❌' in text
+
+
+@pytest.mark.asyncio
+async def test_policy_choice_is_previewed_before_saving(bot):
+    update, context = callback()
+    await bot.handle_console_callback(update, context, 'cfg_tp1_min_volume_action')
+    assert bot.service.risk_config.tp1_min_volume_action == 'breakeven'
+    await bot.handle_console_callback(update, context, 'policy_:tp1_min_volume_action:skip')
+    bot.service.save_risk_config_to_db.assert_not_awaited()
+    assert bot.service.risk_config.tp1_min_volume_action == 'breakeven'
+    token = next(iter(bot._drafts))
+    await bot.handle_console_callback(update, context, f'draft_ok_{token}')
+    assert bot.service.risk_config.tp1_min_volume_action == 'skip'
+
+
+@pytest.mark.asyncio
+async def test_be_button_previews_and_confirms_exact_proposal(bot):
+    update, context = callback()
+    bot.service.breakeven_preview = AsyncMock(return_value={'text': 'SL dự kiến: 2650', 'price': D('2650')})
+    bot.service.move_to_breakeven = AsyncMock(return_value=OrderResult(True, price=D('2650')))
+    await bot.handle_console_callback(update, context, 'be_1')
+    bot.service.move_to_breakeven.assert_not_awaited()
+    token = next(iter(bot._drafts))
+    await bot.handle_console_callback(update, context, f'draft_ok_{token}')
+    bot.service.move_to_breakeven.assert_awaited_once_with(1, expected_price=D('2650'))

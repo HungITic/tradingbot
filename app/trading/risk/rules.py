@@ -23,7 +23,10 @@ class RiskContext:
     account: AccountInfo
     open_positions: list[PositionInfo] = field(default_factory=list)
     today_realized_pnl: Decimal = Decimal("0.0")
-    today_starting_balance: Decimal = Decimal("500.0")
+    today_starting_balance: Decimal = Decimal("0.0")
+    daily_history_available: bool = True
+    planned_order_count: int = 1
+    pending_order_count: int = 0
     recent_signals: list[dict[str, Any]] = field(default_factory=list)
     broker_connected: bool = True
 
@@ -106,7 +109,8 @@ class MaxPositionsRule(AbstractRiskRule):
             return RiskResult(rule_name=self.name, status=RiskStatus.APPROVED)
 
         current_count = len(context.open_positions)
-        if current_count >= context.config.max_open_positions:
+        current_count += context.pending_order_count
+        if current_count + context.planned_order_count > context.config.max_open_positions:
             return RiskResult(
                 rule_name=self.name,
                 status=RiskStatus.REJECTED,
@@ -123,6 +127,9 @@ class DailyLossRule(AbstractRiskRule):
         if signal.message_type.value != "NEW_ORDER":
             return RiskResult(rule_name=self.name, status=RiskStatus.APPROVED)
 
+        if not context.daily_history_available:
+            return RiskResult(rule_name="daily_history", status=RiskStatus.REJECTED,
+                              reason="Không đọc được lịch sử giao dịch để kiểm tra giới hạn lỗ ngày")
         base_balance = context.today_starting_balance or context.account.balance
         if base_balance <= 0:
             return RiskResult(rule_name=self.name, status=RiskStatus.APPROVED)

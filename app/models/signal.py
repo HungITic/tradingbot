@@ -126,3 +126,12 @@ class ParsedSignal(Base):
 
     # Relationships
     signal: Mapped[Signal] = relationship(back_populates="parsed_signal")
+
+
+class SignalReceipt(Base):
+    """Durable claim: replay/reconnect must not execute the same Telegram message twice."""
+
+    __tablename__ = "signal_receipts"
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    message_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

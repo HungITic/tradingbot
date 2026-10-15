@@ -24,6 +24,10 @@ from app.trading.service import TradingService
 def mock_db_session():
     mock_session = AsyncMock()
     mock_session.add = MagicMock()
+    mock_session.execute.return_value = MagicMock()
+    mock_session.execute.return_value.scalar_one_or_none.return_value = 1
+    mock_session.scalars.return_value = MagicMock()
+    mock_session.scalars.return_value.all.return_value = []
     mock_session.flush = AsyncMock()
     mock_session.commit = AsyncMock()
     mock_session.rollback = AsyncMock()
@@ -82,12 +86,14 @@ def mock_broker():
     broker.modify_position = AsyncMock(
         return_value=OrderResult(success=True, ticket=999888, comment="Modified")
     )
+    from app.broker.base import SymbolInfo
+    broker.get_symbol_info = AsyncMock(return_value=SymbolInfo("XAUUSD", 5, Decimal(".00001"), Decimal(".01"), Decimal("100"), Decimal(".01"), Decimal("100")))
     return broker
 
 
 @pytest.mark.asyncio
 async def test_service_executes_new_order_signal(mock_broker):
-    service = TradingService(broker=mock_broker)
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     notifications = []
 
     async def mock_notify(msg: str):
@@ -126,7 +132,7 @@ async def test_service_executes_new_order_signal(mock_broker):
 
 @pytest.mark.asyncio
 async def test_service_single_price_signal_executes_one_order(mock_broker):
-    service = TradingService(broker=mock_broker)
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     notifications = []
 
     async def mock_notify(msg: str):
@@ -161,7 +167,7 @@ async def test_service_favorable_price_executes_market_order(mock_broker):
             time=datetime.now(timezone.utc),
         )
     )
-    service = TradingService(broker=mock_broker)
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     notifications = []
     service.set_notification_callback(lambda msg: notifications.append(msg))
 
@@ -187,7 +193,7 @@ async def test_service_acceptable_slippage_executes_market_order(mock_broker):
             time=datetime.now(timezone.utc),
         )
     )
-    service = TradingService(broker=mock_broker)
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     notifications = []
     service.set_notification_callback(lambda msg: notifications.append(msg))
 
@@ -213,7 +219,7 @@ async def test_service_excessive_slippage_skips_market_order_and_warns(mock_brok
             time=datetime.now(timezone.utc),
         )
     )
-    service = TradingService(broker=mock_broker)
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     notifications = []
     service.set_notification_callback(lambda msg: notifications.append(msg))
 
@@ -239,7 +245,7 @@ async def test_service_middle_zone_executes_both_market_and_pending_limit(mock_b
             time=datetime.now(timezone.utc),
         )
     )
-    service = TradingService(broker=mock_broker)
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     notifications = []
     service.set_notification_callback(lambda msg: notifications.append(msg))
 
@@ -275,7 +281,7 @@ async def test_service_price_exceeding_max_entry_warns_and_skips(mock_broker):
             time=datetime.now(timezone.utc),
         )
     )
-    service = TradingService(broker=mock_broker)
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     notifications = []
     service.set_notification_callback(lambda msg: notifications.append(msg))
 
@@ -289,7 +295,7 @@ async def test_service_price_exceeding_max_entry_warns_and_skips(mock_broker):
 
 @pytest.mark.asyncio
 async def test_service_rejects_signal_when_paused(mock_broker):
-    service = TradingService(broker=mock_broker)
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     service.risk_config.enabled = False
     notifications = []
 
@@ -333,7 +339,14 @@ async def test_service_handles_partial_close_and_auto_breakeven(mock_broker):
     )
     mock_broker.get_positions = AsyncMock(return_value=[pos])
 
-    service = TradingService(broker=mock_broker)
+    async def management_tick(symbol):
+        from datetime import datetime, timezone
+        positions = mock_broker.get_positions.return_value
+        matching = next((p for p in positions if p.symbol == symbol), positions[0])
+        return TickInfo(symbol, matching.current_price, matching.current_price + Decimal(".01"), datetime.now(timezone.utc))
+    mock_broker.get_tick.side_effect = management_tick
+
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     service.risk_config.auto_breakeven_on_partial = True
     service.risk_config.default_partial_close_percent = Decimal("50.0")
 
@@ -385,7 +398,14 @@ async def test_service_skips_duplicate_partial_close_after_tp1(mock_broker):
     )
     mock_broker.get_positions = AsyncMock(return_value=[pos])
 
-    service = TradingService(broker=mock_broker)
+    async def management_tick(symbol):
+        from datetime import datetime, timezone
+        positions = mock_broker.get_positions.return_value
+        matching = next((p for p in positions if p.symbol == symbol), positions[0])
+        return TickInfo(symbol, matching.current_price, matching.current_price + Decimal(".01"), datetime.now(timezone.utc))
+    mock_broker.get_tick.side_effect = management_tick
+
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     # Simulate that TP1 was already executed by cronjob
     service._tp1_processed_tickets.add(999888)
 
@@ -427,7 +447,14 @@ async def test_service_allows_multiple_partial_closes_when_configured(mock_broke
     )
     mock_broker.get_positions = AsyncMock(return_value=[pos])
 
-    service = TradingService(broker=mock_broker)
+    async def management_tick(symbol):
+        from datetime import datetime, timezone
+        positions = mock_broker.get_positions.return_value
+        matching = next((p for p in positions if p.symbol == symbol), positions[0])
+        return TickInfo(symbol, matching.current_price, matching.current_price + Decimal(".01"), datetime.now(timezone.utc))
+    mock_broker.get_tick.side_effect = management_tick
+
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     service._tp1_processed_tickets.add(999889)
     # User explicitly enables multiple partial closes
     service.risk_config.allow_multiple_partial_closes = True
@@ -452,8 +479,8 @@ async def test_service_combo_chot_bot_and_dich_stoploss(mock_broker):
         symbol="XAUUSDm",
         volume=Decimal("1.00"),
         open_price=Decimal("4090.00"),
-        current_price=Decimal("4102.00"),
-        sl=Decimal("4080.00"),
+        current_price=Decimal("4080.00"),
+        sl=Decimal("4120.00"),
         tp=Decimal("4120.00"),
         profit=Decimal("120.00"),
         swap=Decimal("0"),
@@ -466,8 +493,8 @@ async def test_service_combo_chot_bot_and_dich_stoploss(mock_broker):
         symbol="XAUUSDm",
         volume=Decimal("1.00"),
         open_price=Decimal("4095.00"),
-        current_price=Decimal("4102.00"),
-        sl=Decimal("4080.00"),
+        current_price=Decimal("4080.00"),
+        sl=Decimal("4120.00"),
         tp=Decimal("4120.00"),
         profit=Decimal("70.00"),
         swap=Decimal("0"),
@@ -475,33 +502,42 @@ async def test_service_combo_chot_bot_and_dich_stoploss(mock_broker):
         position_type="SELL",
         open_time=datetime.now(timezone.utc),
     )
+    pos1.comment = "bot-min-entry"
+    pos2.comment = "bot-max-entry"
     mock_broker.get_positions = AsyncMock(return_value=[pos1, pos2])
     mock_broker.modify_position = AsyncMock(return_value=OrderResult(success=True, comment="Modified"))
     mock_broker.close_position = AsyncMock(return_value=OrderResult(success=True, comment="Closed"))
 
-    service = TradingService(broker=mock_broker)
+    async def management_tick(symbol):
+        from datetime import datetime, timezone
+        positions = mock_broker.get_positions.return_value
+        matching = next((p for p in positions if p.symbol == symbol), positions[0])
+        return TickInfo(symbol, matching.current_price, matching.current_price + Decimal(".01"), datetime.now(timezone.utc))
+    mock_broker.get_tick.side_effect = management_tick
+
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     raw_msg = (
         "#XAU Khớp Full 2 Entry Cậu Sập +120pips\n"
         "Anh em chủ động chốt bớt entry xấu đi dịch stoploss gồng TP"
     )
     await service.process_raw_message(raw_msg)
 
-    # 1. Both positions should have SL modified: 2 calls from MOVE_SL + 2 calls from auto_breakeven_on_partial
-    assert mock_broker.modify_position.call_count == 4
+    # Explicit SL instruction handles each position once; auto BE is not duplicated.
+    assert mock_broker.modify_position.call_count == 2
 
-    # 2. Both positions should be partially closed (50% = 0.5 lot)
-    assert mock_broker.close_position.call_count == 2
+    # Only Min Entry is partially closed; Max Entry volume remains unchanged.
+    assert mock_broker.close_position.call_count == 1
     closed_tickets = [call[0][0] for call in mock_broker.close_position.call_args_list]
     closed_volumes = [call[0][1] for call in mock_broker.close_position.call_args_list]
     assert 342003626 in closed_tickets
-    assert 342003636 in closed_tickets
-    assert closed_volumes == [Decimal("0.50"), Decimal("0.50")]
+    assert 342003636 not in closed_tickets
+    assert closed_volumes == [Decimal("0.50")]
 
 
 
 @pytest.mark.asyncio
 async def test_service_management_rules_add_and_remove(mock_broker):
-    service = TradingService(broker=mock_broker)
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
 
     # 1. Add new custom Vietnamese keyword rule
     ok = await service.add_or_update_management_rule(
@@ -577,7 +613,7 @@ async def test_service_get_closed_deals(mock_broker):
     ]
     mock_broker.get_history_deals = AsyncMock(return_value=deals_sample)
 
-    service = TradingService(broker=mock_broker)
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     closed = await service.get_closed_deals(days=7, limit=10)
 
     assert len(closed) == 2
@@ -655,7 +691,7 @@ async def test_service_get_closed_positions_aggregated(mock_broker):
     mock_broker.get_history_deals = AsyncMock(return_value=deals_sample)
     mock_broker.get_positions = AsyncMock(return_value=[])
 
-    service = TradingService(broker=mock_broker)
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     positions = await service.get_closed_positions(days=7)
 
     # Must aggregate to 2 positions (not 3 exit deals!)
@@ -737,7 +773,7 @@ async def test_service_get_closed_positions_partially_closed_active(mock_broker)
     )
     mock_broker.get_positions = AsyncMock(return_value=[active_pos])
 
-    service = TradingService(broker=mock_broker)
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     positions = await service.get_closed_positions(days=7)
 
     assert len(positions) == 1
@@ -842,7 +878,7 @@ async def test_service_get_closed_positions_comment_fallback(mock_broker):
     mock_broker.get_history_deals = AsyncMock(return_value=deals_sample)
     mock_broker.get_positions = AsyncMock(return_value=[])
 
-    service = TradingService(broker=mock_broker)
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     positions = await service.get_closed_positions(days=7)
 
     assert len(positions) == 1
@@ -888,7 +924,7 @@ async def test_service_get_performance_summary(mock_broker):
     ]
     mock_broker.get_history_deals = AsyncMock(return_value=deals_sample)
 
-    service = TradingService(broker=mock_broker)
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     stats = await service.get_performance_summary(days=7)
 
     assert stats["total_trades"] == 2
@@ -911,7 +947,14 @@ async def test_service_tp1_and_tp2_milestones(mock_broker):
     mock_broker.close_position = AsyncMock(return_value=OrderResult(success=True, comment="Closed"))
     mock_broker.modify_position = AsyncMock(return_value=OrderResult(success=True, comment="Modified"))
 
-    service = TradingService(broker=mock_broker)
+    async def management_tick(symbol):
+        from datetime import datetime, timezone
+        positions = mock_broker.get_positions.return_value
+        matching = next((p for p in positions if p.symbol == symbol), positions[0])
+        return TickInfo(symbol, matching.current_price, matching.current_price + Decimal(".01"), datetime.now(timezone.utc))
+    mock_broker.get_tick.side_effect = management_tick
+
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     notifications = []
     service.set_notification_callback(lambda msg: notifications.append(msg))
 
@@ -931,6 +974,10 @@ async def test_service_tp1_and_tp2_milestones(mock_broker):
     class MockSession:
         async def scalars(self, stmt):
             return MockScalars()
+        async def execute(self, stmt):
+            result = MagicMock()
+            result.all.return_value = []
+            return result
         async def scalar(self, stmt):
             return 1
         def add(self, obj):
@@ -1026,7 +1073,7 @@ async def test_service_buy_dual_entry_min_and_max_entry_handling(mock_broker):
             time=datetime.now(timezone.utc),
         )
     )
-    service = TradingService(broker=mock_broker)
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     notifications = []
     service.set_notification_callback(lambda msg: notifications.append(msg))
 
@@ -1059,7 +1106,7 @@ async def test_duplicate_signal_asks_user_confirmation(mock_broker):
             time=datetime.now(timezone.utc),
         )
     )
-    service = TradingService(broker=mock_broker)
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     notifications = []
 
     async def mock_notify(msg: str, reply_markup=None):
@@ -1089,7 +1136,8 @@ async def test_duplicate_signal_asks_user_confirmation(mock_broker):
     # Now simulate user clicking override button
     sig_id = list(service._pending_overrides.keys())[0]
     res_msg = await service.execute_override_order(sig_id, "both")
-    assert "Order Placed" in res_msg or "Order Executed" in res_msg
+    assert "✅ BUY XAUUSD" in res_msg
+    assert "✅ BUY_LIMIT XAUUSD" in res_msg
 
 
 @pytest.mark.asyncio
@@ -1126,7 +1174,7 @@ async def test_max_positions_asks_user_confirmation(mock_broker):
         )
     )
 
-    service = TradingService(broker=mock_broker)
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     service.risk_config.max_open_positions = 5
     notifications = []
 
@@ -1225,7 +1273,7 @@ async def test_reply_position_management_targets_only_replied_signal_positions(m
     mock_broker.close_position = AsyncMock(return_value=OrderResult(success=True, ticket=101, comment="Closed"))
     mock_broker.cancel_order = AsyncMock(return_value=OrderResult(success=True, ticket=103, comment="Cancelled"))
 
-    service = TradingService(broker=mock_broker)
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     # Map tickets to signal messages
     service._signal_msg_id_to_tickets[1000] = [101, 102, 103]
     service._signal_msg_id_to_tickets[2000] = [201, 202]
@@ -1254,14 +1302,14 @@ async def test_reply_position_management_targets_only_replied_signal_positions(m
 
 
 @pytest.mark.asyncio
-async def test_reply_position_management_breakeven_vwap(mock_broker):
+async def test_reply_position_management_uses_each_ticket_entry(mock_broker):
     """Verify that Breakeven dời SL calculates VWAP of only the target signal's positions."""
     from datetime import datetime, timezone
 
     # Signal 1000 has 2 positions:
     # 0.01 lot @ 2650.00
     # 0.02 lot @ 2640.00
-    # Total vol = 0.03. VWAP = (0.01*2650 + 0.02*2640) / 0.03 = 79.3 / 0.03 = 2643.33333
+    # Different entry prices must remain independent, even within one setup.
     pos_1 = PositionInfo(
         ticket=101,
         symbol="XAUUSD",
@@ -1310,15 +1358,21 @@ async def test_reply_position_management_breakeven_vwap(mock_broker):
     mock_broker.get_pending_orders = AsyncMock(return_value=[])
     mock_broker.modify_position = AsyncMock(return_value=OrderResult(success=True, ticket=101, comment="Modified"))
 
-    service = TradingService(broker=mock_broker)
+    async def management_tick(symbol):
+        from datetime import datetime, timezone
+        positions = mock_broker.get_positions.return_value
+        matching = next((p for p in positions if p.symbol == symbol), positions[0])
+        return TickInfo(symbol, matching.current_price, matching.current_price + Decimal(".01"), datetime.now(timezone.utc))
+    mock_broker.get_tick.side_effect = management_tick
+
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     service.risk_config.breakeven_offset_price = Decimal("0.0")
     service._signal_msg_id_to_tickets[1000] = [101, 102]
 
     # Command: "Dời SL về hòa" replying to message 1000
     await service.process_raw_message("Dời SL về hòa", reply_to_msg_id=1000)
 
-    # Expected VWAP: (2650*1 + 2640*2) / 3 = 2643.33333
-    expected_vwap = Decimal("2643.33333")
+    # Each ticket moves to its own entry; no shared average is used.
 
     modified_calls = mock_broker.modify_position.call_args_list
     assert len(modified_calls) == 2
@@ -1326,7 +1380,7 @@ async def test_reply_position_management_breakeven_vwap(mock_broker):
         ticket = call.args[0]
         sl = call.kwargs["sl"]
         assert ticket in (101, 102)
-        assert sl == expected_vwap
+        assert sl == {101: Decimal("2650"), 102: Decimal("2640")}[ticket]
 
 
 @pytest.mark.asyncio
@@ -1353,7 +1407,7 @@ async def test_reply_position_management_already_closed(mock_broker):
     mock_broker.get_positions = AsyncMock(return_value=[pos_other])
     mock_broker.get_pending_orders = AsyncMock(return_value=[])
 
-    service = TradingService(broker=mock_broker)
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     service._signal_msg_id_to_tickets[1000] = [101, 102]
 
     notifications = []
@@ -1402,12 +1456,12 @@ async def test_dual_entry_cancels_remaining_pending_limit_when_position_closes(m
         setup_time=datetime.now(timezone.utc),
     )
 
-    mock_broker.get_positions = AsyncMock(return_value=[pos_min])
+    mock_broker.get_positions = AsyncMock(return_value=[])
     mock_broker.get_pending_orders = AsyncMock(return_value=[pending_max])
     mock_broker.close_position = AsyncMock(return_value=OrderResult(success=True, ticket=1001, comment="Closed"))
     mock_broker.cancel_order = AsyncMock(return_value=OrderResult(success=True, ticket=1002, comment="Cancelled"))
 
-    service = TradingService(broker=mock_broker)
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     # Both orders belong to signal 500
     service._signal_db_id_to_tickets[500] = [1001, 1002]
     service._ticket_to_signal_db_id[1001] = 500
@@ -1470,7 +1524,7 @@ async def test_dual_entry_both_filled_does_not_cancel(mock_broker):
     mock_broker.close_position = AsyncMock(return_value=OrderResult(success=True, ticket=1001, comment="Closed"))
     mock_broker.cancel_order = AsyncMock()
 
-    service = TradingService(broker=mock_broker)
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     service._signal_db_id_to_tickets[500] = [1001, 1002]
     service._ticket_to_signal_db_id[1001] = 500
     service._ticket_to_signal_db_id[1002] = 500
@@ -1507,7 +1561,9 @@ async def test_reconcile_dual_entry_pending_orders_cancels_when_sibling_closed(m
     mock_broker.get_pending_orders = AsyncMock(return_value=[pending_max])
     mock_broker.cancel_order = AsyncMock(return_value=OrderResult(success=True, ticket=1002, comment="Cancelled"))
 
-    service = TradingService(broker=mock_broker)
+    mock_broker.get_history_deals.return_value = [MagicMock(position_id=1001, entry="OUT")]
+
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     service._signal_db_id_to_tickets[500] = [1001, 1002]
     service._ticket_to_signal_db_id[1002] = 500
 
@@ -1577,7 +1633,7 @@ async def test_personal_bot_format_history_message(mock_broker):
     mock_broker.get_history_deals = AsyncMock(return_value=deals)
     mock_broker.get_positions = AsyncMock(return_value=[])
 
-    service = TradingService(broker=mock_broker)
+    service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     bot = PersonalTelegramBot(service=service)
 
     msg, keyboard = await bot._format_history_message(days=7)

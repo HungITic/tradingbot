@@ -210,15 +210,15 @@ class MT5Executor(BrokerAdapter):
 
     async def get_positions(self, symbol: str | None = None) -> list[PositionInfo]:
         if not self._client.is_connected or mt5 is None:
-            return []
+            raise RuntimeError("MT5 position/order snapshot is unavailable")
         try:
             raw_list = await self._client.run_in_thread(mt5.positions_get)
         except Exception as e:
             logger.warning("mt5_get_positions_failed", error=str(e))
             self._client._connected = False
-            return []
+            raise RuntimeError("MT5 position/order snapshot is unavailable")
         if raw_list is None:
-            return []
+            raise RuntimeError("MT5 position/order snapshot is unavailable")
 
         all_positions = [map_position_info(pos) for pos in raw_list]
         if not symbol:
@@ -243,15 +243,15 @@ class MT5Executor(BrokerAdapter):
 
     async def get_pending_orders(self, symbol: str | None = None) -> list[PendingOrderInfo]:
         if not self._client.is_connected or mt5 is None:
-            return []
+            raise RuntimeError("MT5 position/order snapshot is unavailable")
         try:
             raw_list = await self._client.run_in_thread(mt5.orders_get)
         except Exception as e:
             logger.warning("mt5_get_orders_failed", error=str(e))
             self._client._connected = False
-            return []
+            raise RuntimeError("MT5 position/order snapshot is unavailable")
         if raw_list is None:
-            return []
+            raise RuntimeError("MT5 position/order snapshot is unavailable")
 
         all_orders = [map_pending_order_info(order) for order in raw_list]
         if not symbol:
@@ -463,7 +463,7 @@ class MT5Executor(BrokerAdapter):
     ) -> list[DealInfo]:
         """Fetch historical executed deals within the last `days` days."""
         if not self._client.is_connected or mt5 is None:
-            return []
+            raise RuntimeError("MT5 history is unavailable")
 
         now = datetime.now()
         if start_time:
@@ -485,8 +485,10 @@ class MT5Executor(BrokerAdapter):
             except Exception as e2:
                 logger.warning("mt5_history_deals_failed", error=str(e2))
                 self._client._connected = False
-                return []
+                raise RuntimeError("MT5 history query failed") from e2
 
+        if raw_list is None:
+            raise RuntimeError("MT5 history query returned no result")
         if not raw_list:
             return []
 

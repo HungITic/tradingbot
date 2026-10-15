@@ -223,7 +223,7 @@ class TestManagementRules:
 
         # Verify default percentage
         partial = next(a for a in signal.management_actions if a.action_type == ManagementType.PARTIAL_CLOSE)
-        assert partial.percentage == Decimal("50")
+        assert partial.percentage is None  # Resolved from runtime configuration by the service.
 
     def test_parse_explicit_percentage(self, parser):
         text = "#XAU chốt bớt 30% dời sl về entry"

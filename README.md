@@ -6,6 +6,8 @@ Toàn bộ hệ thống được điều khiển, giám sát và cấu hình rea
 
 ---
 
+Bản nâng cấp 15/10/2026 bổ sung menu Telegram, xem trước tín hiệu, xác nhận cấu hình và kiểm tra thực thi. Xem [hướng dẫn nâng cấp](docs/upgrade_2026_10_15.md). Chính sách TP1, hòa vốn và hủy nhánh chờ được mô tả tại [quản lý kèo](docs/position_policy.md).
+
 ## ⚡ Bắt Đầu Nhanh (Quick Start)
 
 ### 1. Khởi động PostgreSQL
@@ -46,7 +48,7 @@ Nội dung bao gồm:
 ---
 
 ## 🧪 Chạy Kiểm Thử Tự Động (Unit Tests)
-Hệ thống đi kèm bộ kiểm thử tự động 24 test cases kiểm tra Parser, Risk Engine, và Trading Service:
+Hệ thống đi kèm bộ kiểm thử tự động 183 test cases kiểm tra Parser, Risk Engine, và Trading Service:
 ```bash
-.venv/bin/pytest tests/ -v
+DEBUG=false .venv/bin/pytest tests/ -v
 ```

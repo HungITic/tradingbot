@@ -52,6 +52,8 @@ class ParsedManagementAction(BaseModel):
     percentage: Decimal | None = None  # e.g., 50 for 50% partial close
     target: str | None = None  # e.g., "ENTRY", "BREAKEVEN"
     price: Decimal | None = None
+    percentage_source: str = "default"
+    side: OrderAction | None = None
     keyword: str = ""  # The keyword that triggered this action
 
 

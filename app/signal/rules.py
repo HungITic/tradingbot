@@ -10,7 +10,7 @@ import re
 from decimal import Decimal
 from typing import Any
 
-from app.signal.models import ManagementType, ParsedManagementAction
+from app.signal.models import ManagementType, ParsedManagementAction, OrderAction
 
 
 class ManagementRuleDefinition:
@@ -34,11 +34,11 @@ class ManagementRuleDefinition:
 
 DEFAULT_RULES: list[ManagementRuleDefinition] = [
     # Partial close (chốt bớt / chốt 1 phần)
-    ManagementRuleDefinition("chốt bớt 1 phần", ManagementType.PARTIAL_CLOSE, {"percentage": Decimal("50")}, priority=12),
-    ManagementRuleDefinition("chốt 1 phần", ManagementType.PARTIAL_CLOSE, {"percentage": Decimal("50")}, priority=11),
-    ManagementRuleDefinition("chốt lãi 1 phần", ManagementType.PARTIAL_CLOSE, {"percentage": Decimal("50")}, priority=11),
-    ManagementRuleDefinition("chốt bớt lãi", ManagementType.PARTIAL_CLOSE, {"percentage": Decimal("50")}, priority=11),
-    ManagementRuleDefinition("chốt bớt", ManagementType.PARTIAL_CLOSE, {"percentage": Decimal("50")}, priority=10),
+    ManagementRuleDefinition("chốt bớt 1 phần", ManagementType.PARTIAL_CLOSE, {}, priority=12),
+    ManagementRuleDefinition("chốt 1 phần", ManagementType.PARTIAL_CLOSE, {}, priority=11),
+    ManagementRuleDefinition("chốt lãi 1 phần", ManagementType.PARTIAL_CLOSE, {}, priority=11),
+    ManagementRuleDefinition("chốt bớt lãi", ManagementType.PARTIAL_CLOSE, {}, priority=11),
+    ManagementRuleDefinition("chốt bớt", ManagementType.PARTIAL_CLOSE, {}, priority=10),
 
     # Full close (chốt hết / chốt all / đóng lệnh)
     ManagementRuleDefinition("chốt hết", ManagementType.CLOSE, {"percentage": Decimal("100")}, priority=10),
@@ -55,7 +55,6 @@ DEFAULT_RULES: list[ManagementRuleDefinition] = [
     ManagementRuleDefinition("đóng buy", ManagementType.CLOSE, {"percentage": Decimal("100")}, priority=8),
     ManagementRuleDefinition("đóng sell", ManagementType.CLOSE, {"percentage": Decimal("100")}, priority=8),
     ManagementRuleDefinition("cắt hết", ManagementType.CLOSE, {"percentage": Decimal("100")}, priority=8),
-    ManagementRuleDefinition("dừng", ManagementType.CLOSE, {"percentage": Decimal("100")}, priority=1),
 
     # Move SL / Breakeven
     ManagementRuleDefinition("dời sl về entry", ManagementType.MOVE_SL, {"target": "ENTRY"}, priority=10),
@@ -148,15 +147,42 @@ class ManagementRuleEngine:
                 matched_spans.append((start, end))
 
                 # Build action
-                pct = explicit_pct or rule.default_params.get("percentage")
+                pct = explicit_pct if explicit_pct is not None else rule.default_params.get("percentage")
                 target = rule.default_params.get("target")
+                if (rule.action_type == ManagementType.PARTIAL_CLOSE
+                        and re.search(r"\bchốt\s+bớt\b", lower_text)
+                        and re.search(r"\bxấu\b", lower_text)):
+                    target = "MIN_ENTRY"
 
+                price = None
+                if rule.action_type == ManagementType.MOVE_SL:
+                    price_match = re.match(r"\s*(?:(?:về|tới|to|at|lên|xuống|sang|tại)\s*)?[:=@]?\s*([+-]?\d[\d.,]*)", lower_text[end:])
+                    if price_match:
+                        from app.signal.normalizer import parse_price
+                        token = price_match.group(1)
+                        price = parse_price(token.lstrip("+-"))
+                        if price is not None and token.startswith("-"):
+                            price = -price
+                side = None
+                if rule.action_type == ManagementType.CLOSE:
+                    if re.search(r"\b(?:buy|mua|long)\b", rule.keyword):
+                        side = OrderAction.BUY
+                    elif re.search(r"\b(?:sell|bán|short)\b", rule.keyword):
+                        side = OrderAction.SELL
                 action = ParsedManagementAction(
                     action_type=rule.action_type,
                     percentage=pct,
+                    percentage_source="message" if explicit_pct is not None else "rule" if pct is not None else "default",
                     target=target,
                     keyword=rule.keyword,
+                    price=price,
+                    side=side,
                 )
                 actions.append(action)
 
-        return actions
+        unique = {}
+        for action in actions:
+            kind = "STOP" if action.action_type in {ManagementType.MOVE_SL, ManagementType.BREAKEVEN} else action.action_type.value
+            key = (kind, action.price, action.side, action.percentage, action.target)
+            unique.setdefault(key, action)
+        return list(unique.values())

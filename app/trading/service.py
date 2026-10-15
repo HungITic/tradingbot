@@ -5,6 +5,10 @@ Trading Service — coordinates signals, risk evaluation, execution, and admin c
 from __future__ import annotations
 
 import time
+import asyncio
+from datetime import datetime, timezone
+from dataclasses import replace
+from html import escape
 from decimal import Decimal
 from typing import Any, Callable, Coroutine
 
@@ -36,7 +40,11 @@ from app.core.timezone import format_vietnam_time, now_vietnam, set_broker_utc_o
 logger = structlog.get_logger(__name__)
 
 
-class TradingService:
+from app.trading.safety import TradingSafetyMixin
+from app.trading.position_policy import PositionPolicyMixin
+
+
+class TradingService(PositionPolicyMixin, TradingSafetyMixin):
     """Core trade coordinator and order router."""
 
     def __init__(
@@ -73,13 +81,16 @@ class TradingService:
                     lot_max_entry=Decimal(str(getattr(settings.trading, "lot_max_entry", 0.01))),
                     max_slippage_entry=Decimal(str(getattr(settings.trading, "max_slippage_entry", 1.0))),
                 )
-            except Exception:
-                self.risk_config = RiskConfig()
+            except Exception as exc:
+                logger.error("invalid_startup_risk_config", error=str(exc))
+                self.risk_config = RiskConfig(enabled=False)
 
+        self._execution_lock = asyncio.Lock()
         self._recent_signals: list[dict[str, Any]] = []
         self._notify_callback: Callable[..., Coroutine[Any, Any, None]] | None = None
         self._pending_overrides: dict[int, dict[str, Any]] = {}
         self._tp1_processed_tickets: set[int] = set()
+        self._tp1_completed_tickets: set[int] = set()
         self._signal_message_links: dict[int, str] = {}
         self._order_message_links: dict[int, str] = {}
         self._signal_msg_id_to_tickets: dict[int, list[int]] = {}
@@ -243,145 +254,6 @@ class TradingService:
                 
             await asyncio.sleep(3)
 
-    async def _check_tp_milestones(self) -> None:
-        """
-        Evaluate live open positions against TP1 and TP2 milestones:
-        - TP1 reached: check if partially closed before. If already closed, skip.
-                       If not, close 50% and move SL to Entry.
-        - TP2 reached: full close 100%.
-        """
-        try:
-            positions = await self.broker.get_positions()
-            if not positions:
-                return
-
-            tickets = [p.ticket for p in positions]
-            from app.config.database import get_session
-            from app.models.trade import Order as DBOrder
-            from sqlalchemy import select
-
-            async with get_session() as session:
-                stmt = select(DBOrder).where(DBOrder.mt5_ticket.in_(tickets))
-                db_orders = {o.mt5_ticket: o for o in (await session.scalars(stmt)).all()}
-
-            for pos in positions:
-                db_order = db_orders.get(pos.ticket)
-                if not db_order:
-                    continue
-
-                tp1 = db_order.tp1
-                tp2 = db_order.tp2
-                if tp1 is None and tp2 is None:
-                    continue
-
-                current_price = pos.current_price
-                is_buy = pos.position_type == "BUY"
-
-                pos_link = self._order_message_links.get(pos.ticket) or (self._signal_message_links.get(db_order.signal_id) if db_order.signal_id else None)
-
-                # 1. Check TP2 first (Full Close)
-                tp2_reached = False
-                if tp2 is not None:
-                    if is_buy and current_price >= tp2:
-                        tp2_reached = True
-                    elif not is_buy and current_price <= tp2:
-                        tp2_reached = True
-
-                if tp2_reached:
-                    res = await self.broker.close_position(pos.ticket, pos.volume)
-                    status_icon = "🎯" if res.success else "❌"
-                    now_str = now_vietnam().strftime("%H:%M:%S %d/%m/%Y")
-                    tp2_msg = (
-                        f"{status_icon} <b>Đạt TP2 ({tp2}): Chốt Lời Toàn Bộ</b>\n"
-                        f"━━━━━━━━━━━━━━━━\n"
-                        f"• <b>{pos.symbol}</b> ({pos.position_type}) <b>{pos.volume} lot</b> @ <code>{current_price}</code>\n"
-                        f"• Ticket: <code>{pos.ticket}</code> | Kết quả: {res.comment}\n"
-                        f"⏱ {now_str}"
-                    )
-                    await self.notify(self.format_notification(tp2_msg, pos_link))
-                    if res.success:
-                        await self.cancel_dual_entry_pending_orders_on_close(
-                            pos.ticket, reason=f"Đạt TP2 ({tp2})"
-                        )
-                    await self._insert_management_action(
-                        signal_db_id=db_order.signal_id,
-                        mt5_ticket=pos.ticket,
-                        action_type="CLOSE",
-                        parameters={"reason": "TP2_REACHED", "price": float(current_price), "tp2": float(tp2)},
-                        status="EXECUTED" if res.success else "FAILED",
-                        result={"comment": res.comment, "retcode": res.retcode},
-                    )
-                    self._tp1_processed_tickets.discard(pos.ticket)
-                    continue
-
-                # 2. Check TP1 (Partial Close 50% & Move SL to Entry)
-                tp1_reached = False
-                if tp1 is not None:
-                    if is_buy and current_price >= tp1:
-                        tp1_reached = True
-                    elif not is_buy and current_price <= tp1:
-                        tp1_reached = True
-
-                if tp1_reached:
-                    already_closed = (
-                        (db_order.volume is not None and pos.volume < db_order.volume)
-                        or (pos.ticket in self._tp1_processed_tickets)
-                    )
-                    if already_closed:
-                        continue
-
-                    vol_to_close = (pos.volume / Decimal("2")).quantize(Decimal("0.01"))
-                    vol_to_close = max(Decimal("0.01"), min(vol_to_close, pos.volume))
-
-                    if pos.volume <= Decimal("0.01"):
-                        be_res = await self.broker.modify_position(pos.ticket, sl=pos.open_price)
-                        self._tp1_processed_tickets.add(pos.ticket)
-                        be_icon = "🎯" if be_res.success else "⚠️"
-                        now_str = now_vietnam().strftime("%H:%M:%S %d/%m/%Y")
-                        tp1_be_msg = (
-                            f"{be_icon} <b>Đạt TP1 ({tp1}): Dời SL Về Entry</b>\n"
-                            f"━━━━━━━━━━━━━━━━\n"
-                            f"• Ticket: <code>{pos.ticket}</code> ({pos.symbol})\n"
-                            f"• SL mới: <code>{pos.open_price}</code> (Hòa vốn)\n"
-                            f"<i>Volume {pos.volume} lot tối thiểu không thể chia nhỏ, dời SL về Entry để gồng TP2.</i>\n"
-                            f"⏱ {now_str}"
-                        )
-                        await self.notify(self.format_notification(tp1_be_msg, pos_link))
-                        await self._insert_management_action(
-                            signal_db_id=db_order.signal_id,
-                            mt5_ticket=pos.ticket,
-                            action_type="MOVE_SL",
-                            parameters={"reason": "TP1_REACHED_MIN_LOT", "sl": float(pos.open_price), "tp1": float(tp1)},
-                            status="EXECUTED" if be_res.success else "FAILED",
-                            result={"comment": be_res.comment, "retcode": be_res.retcode},
-                        )
-                    else:
-                        close_res = await self.broker.close_position(pos.ticket, vol_to_close)
-                        be_res = await self.broker.modify_position(pos.ticket, sl=pos.open_price)
-                        self._tp1_processed_tickets.add(pos.ticket)
-                        icon = "🎯" if close_res.success else "❌"
-                        rem_vol = pos.volume - vol_to_close
-                        now_str = now_vietnam().strftime("%H:%M:%S %d/%m/%Y")
-                        tp1_part_msg = (
-                            f"{icon} <b>Đạt TP1 ({tp1}): Chốt 50% & Dời SL</b>\n"
-                            f"━━━━━━━━━━━━━━━━\n"
-                            f"• Ticket: <code>{pos.ticket}</code> ({pos.symbol})\n"
-                            f"• Đã chốt: <b>{vol_to_close} lot</b> | Còn lại: <b>{rem_vol} lot</b>\n"
-                            f"• SL mới: <code>{pos.open_price}</code> (Entry hòa vốn)\n"
-                            f"⏱ {now_str}"
-                        )
-                        await self.notify(self.format_notification(tp1_part_msg, pos_link))
-                        await self._insert_management_action(
-                            signal_db_id=db_order.signal_id,
-                            mt5_ticket=pos.ticket,
-                            action_type="PARTIAL_CLOSE",
-                            parameters={"reason": "TP1_REACHED", "volume": float(vol_to_close), "sl": float(pos.open_price), "tp1": float(tp1)},
-                            status="EXECUTED" if close_res.success else "FAILED",
-                            result={"comment": close_res.comment, "retcode": close_res.retcode},
-                        )
-        except Exception as e:
-            logger.error("check_tp_milestones_failed", error=str(e))
-
     async def _insert_trade_record(self, deal: DealInfo) -> bool:
         try:
             from app.config.database import get_session
@@ -427,7 +299,7 @@ class TradingService:
                     signal_id=signal_db_id,
                     position_id=pos_id,
                     action_type=action_type,
-                    parameters=parameters,
+                    parameters={**parameters, "ticket": mt5_ticket},
                     status=status,
                     result=result
                 )
@@ -455,58 +327,66 @@ class TradingService:
             logger.error("db_order_update_failed", error=str(e))
             return False
     async def execute_override_order(self, signal_db_id: int, target: str) -> str:
-        """Executes a pending order override (min or max) and returns the result message."""
-        entry = self._pending_overrides.get(signal_db_id)
-        if not entry:
-            return "❌ Lệnh chờ không còn hiệu lực hoặc đã quá hạn."
-        
-        orig_msg_id = None
-        if isinstance(entry, dict) and "orders" in entry:
+        async with self._execution_lock:
+            entry = self._pending_overrides.get(signal_db_id)
+            if not entry or target not in {"both", "min", "max"}:
+                return "❌ Lệnh chờ không còn hiệu lực."
+            signal = entry["signal"]
+            problem = self.signal_problem(signal, entry["signal_time"])
+            if problem:
+                self._pending_overrides.pop(signal_db_id, None)
+                await self.set_signal_status(entry.get("db_id"), "EXPIRED", problem)
+                return f"⛔ {escape(problem)}"
+            context = await self.build_risk_context()
             reqs = entry["orders"]
-            msg_link = entry.get("message_link")
-            orig_msg_id = entry.get("message_id")
-        else:
-            reqs = entry
-            msg_link = None
-        
-        targets_to_execute = list(reqs.keys()) if target == "both" else [target]
-        results = []
-        
-        for t in targets_to_execute:
-            req = reqs.pop(t, None)
-            if not req:
-                results.append(f"❌ Không tìm thấy lệnh chờ {t}.")
-                continue
-                
-            result = await self.broker.open_order(req)
-            if result.success:
-                if msg_link and result.ticket:
-                    self._order_message_links[result.ticket] = msg_link
-                await self._record_db_order(
-                    signal_db_id,
-                    result,
-                    req,
-                    status="PLACED",
-                    message_link=msg_link,
-                    telegram_message_id=orig_msg_id,
-                )
-                results.append(
-                    f"✅ <b>Order Placed ({t.capitalize()} Entry Override)</b>\n"
-                    f"━━━━━━━━━━━━━━━━\n"
-                    f"• Ticket: <code>{result.ticket}</code>\n"
-                    f"• Khối lượng: <b>{result.volume or req.volume} lot</b> @ <code>{req.price}</code>"
-                )
-            else:
-                results.append(
-                    f"❌ <b>Order Failed ({t.capitalize()} Entry Override)</b>\n"
-                    f"━━━━━━━━━━━━━━━━\n"
-                    f"• Lý do: {result.comment} (Mã lỗi: {result.retcode})"
-                )
-        
-        if not reqs:
+            targets = list(reqs) if target == "both" else [target]
+            selected = [reqs[t] for t in targets if t in reqs]
+            context.planned_order_count = len(selected)
+            # Only the explicitly presented rejection may be bypassed. All other rules remain active.
+            allowed = entry.get("allowed_rule")
+            for rule in self.risk_engine.rules:
+                result = rule.evaluate(signal, context)
+                if result.status == RiskStatus.REJECTED and result.rule_name != allowed:
+                    return f"⛔ Không thể duyệt: {escape(result.reason)}"
+            if not selected:
+                return "❌ Lệnh đã được xử lý."
+            prepared = []
+            for req in selected:
+                try:
+                    tick = await self.checked_tick(req.symbol)
+                    price = tick.ask if req.order_type.startswith("BUY") else tick.bid
+                    # Keep pending targets; refresh the execution price only for market orders.
+                    if req.order_type in {"BUY", "SELL"}:
+                        req = replace(req, price=price)
+                    problem = self.check_request(req)
+                    if problem:
+                        return f"⛔ {escape(problem)}"
+                    prepared.append(req)
+                except Exception as exc:
+                    return f"⛔ Không thể kiểm tra giá: {escape(str(exc))}"
+            # Consume the approval before awaiting the broker, so repeated clicks cannot resubmit it.
             self._pending_overrides.pop(signal_db_id, None)
-            
-        return "\n\n".join(results)
+            messages = []
+            successes = 0
+            for req in prepared:
+                if not self.risk_config.enabled:
+                    messages.append("⛔ Bot đã tạm dừng; không gửi thêm lệnh.")
+                    break
+                result = await self.broker.open_order(req)
+                if result.success:
+                    successes += 1
+                    await self._record_db_order(entry.get("db_id"), result, req,
+                        status="FILLED" if req.order_type in {"BUY", "SELL"} else "PLACED",
+                        message_link=entry.get("message_link"), telegram_message_id=entry.get("message_id"))
+                    messages.append(f"✅ {req.order_type} {escape(req.symbol)} · {req.volume} lot · #{result.ticket}")
+                else:
+                    messages.append(f"❌ {escape(result.comment)} (mã {result.retcode})")
+            await self.set_signal_status(entry.get("db_id"),
+                "EXECUTED" if successes == len(prepared) else ("PARTIAL" if successes else "ERROR"))
+            if successes:
+                self._recent_signals.append({"symbol": signal.symbol, "action": signal.new_order.action.value,
+                                             "timestamp": time.time()})
+            return "\n".join(messages)
 
     async def _record_db_order(
         self,
@@ -569,6 +449,14 @@ class TradingService:
         automatically cancel any remaining pending orders (e.g. Max Entry limit order)
         belonging to that same signal.
         """
+        if not self.risk_config.auto_cancel_pending_on_full_close:
+            return []
+        # An exit deal can represent only a partial close. Confirm the position is gone.
+        try:
+            if any(p.ticket == closed_ticket for p in await self.broker.get_positions()):
+                return []
+        except Exception:
+            return []
         sibling_tickets: set[int] = set()
 
         # 1. Resolve from in-memory tracking
@@ -639,10 +527,10 @@ class TradingService:
 
         cancelled_tickets: list[int] = []
         for po in pending_to_cancel:
-            self._cancelled_dual_entry_tickets.add(po.ticket)
             try:
                 res = await self.broker.cancel_order(po.ticket)
                 if res.success:
+                    self._cancelled_dual_entry_tickets.add(po.ticket)
                     cancelled_tickets.append(po.ticket)
                     await self._update_db_order_status(po.ticket, "CANCELLED")
 
@@ -685,6 +573,8 @@ class TradingService:
         sibling order was placed/filled but is no longer open in active positions,
         cancel the remaining pending order immediately.
         """
+        if not self.risk_config.auto_cancel_pending_on_full_close:
+            return []
         try:
             pending_orders = await self.broker.get_pending_orders()
         except Exception as e:
@@ -700,6 +590,11 @@ class TradingService:
             logger.error("reconcile_get_positions_failed", error=str(e))
             return []
 
+        try:
+            history = await self.broker.get_history_deals(days=7)
+            closed_tickets = {d.position_id for d in history if d.entry in {"OUT", "OUT_BY", "INOUT"}}
+        except Exception:
+            return []
         live_pos_tickets = {p.ticket for p in positions}
         live_pending_tickets = {po.ticket for po in pending_orders}
 
@@ -768,16 +663,16 @@ class TradingService:
             for s_ticket in sibling_tickets:
                 is_open = s_ticket in live_pos_tickets
                 is_pending = s_ticket in live_pending_tickets
-                if not is_open and not is_pending:
+                if not is_open and not is_pending and s_ticket in closed_tickets:
                     should_cancel = True
                     closed_sibling_ticket = s_ticket
                     break
 
             if should_cancel and closed_sibling_ticket:
-                self._cancelled_dual_entry_tickets.add(po.ticket)
                 try:
                     res = await self.broker.cancel_order(po.ticket)
                     if res.success:
+                        self._cancelled_dual_entry_tickets.add(po.ticket)
                         cancelled_tickets.append(po.ticket)
                         await self._update_db_order_status(po.ticket, "CANCELLED")
 
@@ -866,7 +761,20 @@ class TradingService:
             positions = []
             connected = False
 
+        daily_available = connected
+        pnl, opening_balance = Decimal("0"), account.balance
+        pending_count = 0
+        try:
+            pnl, opening_balance = await self.daily_risk_snapshot(account)
+            pending_count = len(await self.broker.get_pending_orders())
+        except Exception as exc:
+            daily_available = False
+            logger.warning("risk_snapshot_unavailable", error=str(exc))
         return RiskContext(
+            today_realized_pnl=pnl,
+            today_starting_balance=opening_balance,
+            daily_history_available=daily_available,
+            pending_order_count=pending_count,
             config=self.risk_config,
             account=account,
             open_positions=positions,
@@ -874,7 +782,36 @@ class TradingService:
             broker_connected=connected,
         )
 
-    async def process_raw_message(
+    async def process_raw_message(self, raw_text: str, **kwargs) -> None:
+        # Signals and manual approvals share one execution lane.
+        async with self._execution_lock:
+            chat_id, message_id = kwargs.get("chat_id"), kwargs.get("message_id")
+            if chat_id is not None and message_id is not None:
+                from sqlalchemy.dialects.postgresql import insert
+                from app.config.database import get_session
+                from app.models.signal import SignalReceipt
+                try:
+                    # The transaction commits before any broker mutation.
+                    async with get_session() as session:
+                        result = await session.execute(insert(SignalReceipt).values(
+                            chat_id=chat_id, message_id=message_id).on_conflict_do_nothing()
+                            .returning(SignalReceipt.message_id))
+                        claimed = result.scalar_one_or_none()
+                    if claimed is None:
+                        await self.notify("⛔ Tin nhắn này đã được xử lý hoặc đang chờ duyệt; không thực thi lại.")
+                        return
+                except Exception as exc:
+                    logger.error("signal_claim_failed", error=str(exc))
+                    await self.notify("⛔ Không ghi được dấu xử lý tín hiệu vào database; chưa thực thi.")
+                    return
+            try:
+                await self._process_raw_message(raw_text, **kwargs)
+            except Exception as exc:
+                logger.exception("signal_pipeline_failed", error=str(exc))
+                await self.notify("❌ Xử lý tín hiệu gặp lỗi. Hãy đối chiếu MT5 và hộp thư; "
+                                  "bot không tự gửi lại yêu cầu vì có thể lệnh đã được sàn nhận.")
+
+    async def _process_raw_message(
         self,
         raw_text: str,
         is_reentry: bool = False,
@@ -882,6 +819,7 @@ class TradingService:
         chat_id: int | None = None,
         message_link: str | None = None,
         reply_to_msg_id: int | None = None,
+        signal_time: datetime | None = None,
     ) -> None:
         """Full pipeline: Raw message -> Parse -> Risk -> Execute -> Notify."""
         logger.info(
@@ -895,6 +833,7 @@ class TradingService:
             from app.telegram.utils import construct_telegram_message_link
             message_link = construct_telegram_message_link(chat_id, message_id)
 
+        signal_time = signal_time or datetime.now(timezone.utc)
         signal = self.parser.parse(raw_text)
         signal.is_reentry = is_reentry
 
@@ -925,7 +864,7 @@ class TradingService:
                     raw_message=raw_text,
                     message_type=signal.message_type.value,
                     status="RECEIVED",
-                    parser_version="1.0.0",
+                    parser_version=signal.parser_version,
                 )
                 session.add(sig_record)
                 await session.flush()
@@ -951,11 +890,19 @@ class TradingService:
                     session.add(parsed_record)
         except Exception as e:
             logger.warning("db_signal_record_failed", error=str(e))
+            await self.notify("⛔ Không lưu được tín hiệu vào nhật ký; chưa thực thi.")
+            return
 
         if signal.message_type == MessageType.UNKNOWN:
+            await self.set_signal_status(signal_db_id, "UNKNOWN", signal.metadata.get("reason", "Không nhận diện được tín hiệu"))
             logger.info("signal_unknown_skipped", text=raw_text[:60])
             return
 
+        problem = self.signal_problem(signal, signal_time)
+        if problem:
+            await self.set_signal_status(signal_db_id, "REJECTED", problem)
+            await self.notify(self.format_notification(f"⛔ <b>Signal Rejected</b>\n{escape(problem)}", message_link))
+            return
         context = await self.build_risk_context()
 
         # 2. New Order Flow
@@ -963,19 +910,13 @@ class TradingService:
             action = signal.new_order.action
             symbol = signal.new_order.symbol
 
-            # Fetch live current tick
-            current_price = None
             try:
-                tick = await self.broker.get_tick(symbol)
-                if tick is not None:
-                    p = tick.bid if action == OrderAction.SELL else tick.ask
-                    if isinstance(p, (Decimal, int, float, str)):
-                        current_price = Decimal(str(p))
-            except Exception as e:
-                logger.warning("fetch_tick_failed", symbol=symbol, error=str(e))
-
-            if current_price is None or not isinstance(current_price, Decimal):
-                current_price = signal.new_order.entry_min or Decimal("0")
+                tick = await self.checked_tick(symbol)
+                current_price = tick.bid if action == OrderAction.SELL else tick.ask
+            except Exception as exc:
+                await self.set_signal_status(signal_db_id, "REJECTED", str(exc))
+                await self.notify(f"⛔ Không có giá thị trường hợp lệ: {escape(str(exc))}")
+                return
 
             min_entry = signal.new_order.entry_min
             max_entry = signal.new_order.entry_max
@@ -1025,7 +966,7 @@ class TradingService:
                     tp2=signal.new_order.take_profit_2,
                     comment="bot-override-min",
                 )
-            if max_entry is not None:
+            if has_dual_entry and max_entry is not None:
                 pending_reqs["max"] = OrderRequest(
                     symbol=symbol,
                     order_type=_get_pending_type(action, current_price, max_entry),
@@ -1038,6 +979,9 @@ class TradingService:
                     comment="bot-override-max",
                 )
 
+            context.planned_order_count = 2 if has_dual_entry else 1
+            override_data = {"signal": signal, "signal_time": signal_time, "db_id": signal_db_id,
+                             "message_id": message_id, "allowed_rule": None}
             decision = self.risk_engine.evaluate(signal, context)
 
             if not decision.approved:
@@ -1054,6 +998,7 @@ class TradingService:
                         "daily_loss_limit": "Chạm Giới Hạn Lỗ Ngày (Daily Loss Limit)",
                     }
                     title = rule_titles.get(failed_rule, "Giới Hạn Rủi Ro")
+                    override_data["allowed_rule"] = failed_rule
                     entry_str = f"{min_entry} - {max_entry}" if has_dual_entry else f"{min_entry}"
                     warning_msg = (
                         f"⚠️ <b>Cảnh báo: {title}</b>\n"
@@ -1064,7 +1009,8 @@ class TradingService:
                         f"➡️ <b>Tạm dừng đặt lệnh tự động để bạn quyết định!</b>"
                     )
                     from app.telegram.keyboards import build_override_keyboard
-                    self._pending_overrides[sig_id] = {"orders": pending_reqs, "message_link": message_link}
+                    self._pending_overrides[sig_id] = {**override_data, "orders": pending_reqs, "message_link": message_link}
+                    await self.set_signal_status(signal_db_id, "AWAITING_APPROVAL", failed_reason)
                     kb = build_override_keyboard(sig_id, has_dual=has_dual_entry)
                     await self.notify(self.format_notification(warning_msg, message_link), reply_markup=kb)
                     return
@@ -1075,6 +1021,7 @@ class TradingService:
                     f"• Lệnh: <b>{signal.new_order.action.value} {signal.new_order.symbol}</b>\n"
                     f"• Lý do: {decision.rejection_reason}"
                 )
+                await self.set_signal_status(signal_db_id, "REJECTED", decision.rejection_reason)
                 await self.notify(self.format_notification(msg, message_link))
                 return
 
@@ -1092,8 +1039,9 @@ class TradingService:
                         f"➡️ <i>Giá thị trường đã vượt quá vùng Entry, tạm dừng đặt lệnh!</i>"
                     )
                     from app.telegram.keyboards import build_override_keyboard
-                    self._pending_overrides[sig_id] = {"orders": pending_reqs, "message_link": message_link}
-                    kb = build_override_keyboard(sig_id)
+                    self._pending_overrides[sig_id] = {**override_data, "orders": pending_reqs, "message_link": message_link}
+                    await self.set_signal_status(signal_db_id, "AWAITING_APPROVAL", "Giá vượt vùng vào lệnh")
+                    kb = build_override_keyboard(sig_id, has_dual=has_dual_entry)
                     await self.notify(self.format_notification(warning_msg, message_link), reply_markup=kb)
                     return
                 elif action == OrderAction.BUY and current_price < max_entry:
@@ -1105,8 +1053,9 @@ class TradingService:
                         f"➡️ <i>Giá thị trường đã vượt quá vùng Entry, tạm dừng đặt lệnh!</i>"
                     )
                     from app.telegram.keyboards import build_override_keyboard
-                    self._pending_overrides[sig_id] = {"orders": pending_reqs, "message_link": message_link}
-                    kb = build_override_keyboard(sig_id)
+                    self._pending_overrides[sig_id] = {**override_data, "orders": pending_reqs, "message_link": message_link}
+                    await self.set_signal_status(signal_db_id, "AWAITING_APPROVAL", "Giá vượt vùng vào lệnh")
+                    kb = build_override_keyboard(sig_id, has_dual=has_dual_entry)
                     await self.notify(self.format_notification(warning_msg, message_link), reply_markup=kb)
                     return
 
@@ -1134,11 +1083,13 @@ class TradingService:
                 )
                 from app.telegram.keyboards import build_override_keyboard
                 self._pending_overrides[sig_id] = {
+                    **override_data,
                     "orders": pending_reqs,
                     "message_link": message_link,
                     "message_id": message_id,
                 }
-                kb = build_override_keyboard(sig_id)
+                await self.set_signal_status(signal_db_id, "AWAITING_APPROVAL", "Vượt ngưỡng trượt giá")
+                kb = build_override_keyboard(sig_id, has_dual=has_dual_entry)
                 await self.notify(self.format_notification(warning_msg, message_link), reply_markup=kb)
                 return
 
@@ -1153,7 +1104,15 @@ class TradingService:
                 tp2=signal.new_order.take_profit_2,
                 comment="bot-min-entry" if has_dual_entry else "bot-market",
             )
+            problem = self.check_request(order_req_1)
+            if problem:
+                await self.set_signal_status(signal_db_id, "REJECTED", problem)
+                await self.notify(f"⛔ {escape(problem)}")
+                return
+            if not self.risk_config.enabled:
+                return
             result_1 = await self.broker.open_order(order_req_1)
+            await self.set_signal_status(signal_db_id, "EXECUTED" if result_1.success else "ERROR", result_1.comment)
 
             if result_1.success:
                 self._recent_signals.append(
@@ -1193,7 +1152,7 @@ class TradingService:
             await self.notify(self.format_notification(msg_1, message_link))
 
             # --- Order 2: Max Entry (Pending Limit - always placed when dual entry is enabled) ---
-            if has_dual_entry and max_entry is not None:
+            if result_1.success and self.risk_config.enabled and has_dual_entry and max_entry is not None:
                 vol_max = self.risk_config.lot_max_entry
 
                 # Determine pending limit order type (only place if market has NOT touched max_entry yet)
@@ -1217,7 +1176,14 @@ class TradingService:
                         tp2=signal.new_order.take_profit_2,
                         comment="bot-max-entry",
                     )
+                    problem = self.check_request(order_req_2)
+                    if problem:
+                        await self.set_signal_status(signal_db_id, "PARTIAL", problem)
+                        await self.notify(f"⛔ Nhánh thứ hai chưa được đặt: {escape(problem)}")
+                        return
                     result_2 = await self.broker.open_order(order_req_2)
+                    if not result_2.success:
+                        await self.set_signal_status(signal_db_id, "PARTIAL", result_2.comment)
 
                     if result_2.success:
                         await self._record_db_order(
@@ -1249,288 +1215,8 @@ class TradingService:
 
             return
 
-        # 3. Position Management Flow (chốt bớt, chốt, dời sl)
         if signal.message_type == MessageType.POSITION_MANAGEMENT:
-            target_tickets: list[int] = []
-            if reply_to_msg_id is not None:
-                target_tickets = await self.get_tickets_for_reply_message(reply_to_msg_id)
-                logger.info(
-                    "reply_management_resolved",
-                    reply_to_id=reply_to_msg_id,
-                    target_tickets=target_tickets,
-                )
-
-            # Retrieve active broker positions & pending orders
-            all_positions = await self.broker.get_positions()
-            all_pending = await self.broker.get_pending_orders()
-
-            is_reply_managed = False
-            pending_to_cancel = []
-
-            if reply_to_msg_id is not None:
-                if target_tickets:
-                    positions = [p for p in all_positions if p.ticket in target_tickets]
-                    pending_to_cancel = [o for o in all_pending if o.ticket in target_tickets]
-                    is_reply_managed = True
-                else:
-                    # reply_to_msg_id provided but no mapped tickets in DB
-                    if signal.symbol:
-                        positions = [
-                            p for p in all_positions
-                            if p.symbol.upper().startswith(signal.symbol.upper())
-                        ]
-                    else:
-                        no_match_msg = (
-                            f"⚠️ <b>Position Management:</b>\n"
-                            f"━━━━━━━━━━━━━━━━\n"
-                            f"Nhận tín hiệu reply Signal #{reply_to_msg_id}, "
-                            f"nhưng không tìm thấy mã lệnh tương ứng trong hệ thống."
-                        )
-                        await self.notify(self.format_notification(no_match_msg, message_link))
-                        return
-            else:
-                if signal.symbol:
-                    positions = [
-                        p for p in all_positions
-                        if p.symbol.upper().startswith(signal.symbol.upper())
-                    ]
-                else:
-                    positions = all_positions
-
-            # Check if any positions or pending orders found
-            if not positions and not pending_to_cancel:
-                if is_reply_managed and target_tickets:
-                    tickets_str = ", ".join(f"<code>{t}</code>" for t in target_tickets)
-                    no_pos_msg = (
-                        f"ℹ️ <b>Position Management:</b>\n"
-                        f"━━━━━━━━━━━━━━━━\n"
-                        f"Nhận tín hiệu reply Signal #{reply_to_msg_id}, "
-                        f"nhưng các lệnh (Ticket: {tickets_str}) đã được đóng trước đó."
-                    )
-                else:
-                    no_pos_msg = (
-                        f"ℹ️ <b>Position Management:</b>\n"
-                        f"━━━━━━━━━━━━━━━━\n"
-                        f"Nhận tín hiệu cho {signal.symbol or 'tất cả'}, nhưng không có vị thế nào đang mở."
-                    )
-                await self.notify(self.format_notification(no_pos_msg, message_link))
-                return
-
-            # Cancel any pending limit orders of this replied signal if action is CLOSE
-            for action in signal.management_actions:
-                if action.action_type.value in ("CLOSE", "CANCEL"):
-                    for po in pending_to_cancel:
-                        res = await self.broker.cancel_order(po.ticket)
-                        c_icon = "✅" if res.success else "❌"
-                        now_str = now_vietnam().strftime("%H:%M:%S %d/%m/%Y")
-                        cancel_msg = (
-                            f"{c_icon} <b>Position Management: Hủy Lệnh Chờ Limit</b>\n"
-                            f"━━━━━━━━━━━━━━━━\n"
-                            f"• Áp dụng cho: <b>Signal #{reply_to_msg_id}</b>\n"
-                            f"• Ticket: <code>{po.ticket}</code> ({po.symbol})\n"
-                            f"• Kết quả: {res.comment}\n"
-                            f"⏱ {now_str}"
-                        )
-                        await self.notify(self.format_notification(cancel_msg, message_link))
-
-            if not positions:
-                return
-
-            # Calculate VWAP (Volume-Weighted Average Price) of ONLY the target positions
-            total_vol = sum(p.volume for p in positions)
-            vwap_price = Decimal("0")
-            if total_vol > 0:
-                vwap_price = sum(p.open_price * p.volume for p in positions) / total_vol
-                vwap_price = vwap_price.quantize(Decimal("0.00001"))
-
-            reply_tag = f"• Áp dụng cho: <b>Signal #{reply_to_msg_id}</b>\n" if is_reply_managed else ""
-
-            pos_tickets = [p.ticket for p in positions]
-            db_order_volumes: dict[int, Decimal] = {}
-            already_partial_closed_tickets: set[int] = set(self._tp1_processed_tickets)
-
-            try:
-                import inspect
-                from app.config.database import get_session
-                from app.models.trade import Order as DBOrder, ManagementAction, Position as DBPosition
-                from sqlalchemy import select
-
-                async with get_session() as session:
-                    if pos_tickets:
-                        stmt_ord = select(DBOrder).where(DBOrder.mt5_ticket.in_(pos_tickets))
-                        res_ord = await session.scalars(stmt_ord)
-                        items_ord = res_ord.all()
-                        if inspect.isawaitable(items_ord):
-                            items_ord = await items_ord
-                        # Safely extract scalar volume while session is open to prevent DetachedInstanceError
-                        db_order_volumes = {
-                            o.mt5_ticket: Decimal(str(o.volume))
-                            for o in items_ord
-                            if hasattr(o, "mt5_ticket") and o.volume is not None
-                        }
-
-                        # Check executed partial closes in DB via Position link
-                        stmt_act = (
-                            select(DBPosition.mt5_ticket)
-                            .join(ManagementAction, ManagementAction.position_id == DBPosition.id)
-                            .where(
-                                DBPosition.mt5_ticket.in_(pos_tickets),
-                                ManagementAction.action_type == "PARTIAL_CLOSE",
-                                ManagementAction.status == "EXECUTED",
-                            )
-                        )
-                        res_act = await session.scalars(stmt_act)
-                        items_act = res_act.all()
-                        if inspect.isawaitable(items_act):
-                            items_act = await items_act
-                        for t in items_act:
-                            already_partial_closed_tickets.add(t)
-            except Exception as e:
-                logger.debug("management_db_order_lookup_failed", error=str(e))
-
-            for action in signal.management_actions:
-                for pos in positions:
-                    now_str = now_vietnam().strftime("%H:%M:%S %d/%m/%Y")
-                    if action.action_type.value in ("CLOSE", "PARTIAL_CLOSE"):
-                        vol = pos.volume
-                        if action.action_type.value == "PARTIAL_CLOSE":
-                            # Check if position was already partially closed (e.g. TP1 milestone reached)
-                            db_volume = db_order_volumes.get(pos.ticket)
-                            is_already_partial = (
-                                not self.risk_config.allow_multiple_partial_closes
-                                and (
-                                    pos.ticket in already_partial_closed_tickets
-                                    or (db_volume is not None and pos.volume < db_volume)
-                                )
-                            )
-                            if is_already_partial:
-                                skip_msg = (
-                                    f"ℹ️ <b>Position Management: Bỏ qua chốt bớt</b>\n"
-                                    f"━━━━━━━━━━━━━━━━\n"
-                                    f"{reply_tag}"
-                                    f"• <b>{pos.symbol}</b> (Ticket: <code>{pos.ticket}</code>)\n"
-                                    f"• Vị thế đã chốt 1 phần trước đó (còn lại: <b>{pos.volume} lot</b>).\n"
-                                    f"• Đã bỏ qua lệnh chốt thêm để bảo toàn volume gồng TP2.\n"
-                                    f"⏱ {now_str}"
-                                )
-                                await self.notify(self.format_notification(skip_msg, message_link))
-                                await self._insert_management_action(
-                                    signal_db_id=signal_db_id,
-                                    mt5_ticket=pos.ticket,
-                                    action_type="PARTIAL_CLOSE",
-                                    parameters={"volume": float(pos.volume), "reply_to_msg_id": reply_to_msg_id, "skipped": True, "reason": "ALREADY_PARTIALLY_CLOSED"},
-                                    status="SKIPPED",
-                                    result={"comment": "Skipped duplicate partial close (already executed)", "retcode": 0}
-                                )
-
-                                # Auto Breakeven on partial close if enabled and SL not at entry yet
-                                if self.risk_config.auto_breakeven_on_partial:
-                                    be_sl = vwap_price + self.risk_config.breakeven_offset_price
-                                    if pos.sl is None or abs(pos.sl - be_sl) > Decimal("0.01"):
-                                        be_res = await self.broker.modify_position(pos.ticket, sl=be_sl)
-                                        be_icon = "✅" if be_res.success else "⚠️"
-                                        be_msg = (
-                                            f"{be_icon} <b>Auto Breakeven on Partial</b>\n"
-                                            f"━━━━━━━━━━━━━━━━\n"
-                                            f"{reply_tag}"
-                                            f"• Ticket: <code>{pos.ticket}</code> | SL mới: <code>{be_sl}</code>\n"
-                                            f"• Kết quả: {be_res.comment}\n"
-                                            f"⏱ {now_str}"
-                                        )
-                                        await self.notify(self.format_notification(be_msg, message_link))
-                                        await self._insert_management_action(
-                                            signal_db_id=signal_db_id,
-                                            mt5_ticket=pos.ticket,
-                                            action_type="AUTO_BREAKEVEN",
-                                            parameters={"sl": float(be_sl), "reply_to_msg_id": reply_to_msg_id},
-                                            status="EXECUTED" if be_res.success else "FAILED",
-                                            result={"comment": be_res.comment, "retcode": be_res.retcode}
-                                        )
-                                continue
-
-                            raw_pct = action.percentage or self.risk_config.default_partial_close_percent
-                            pct = raw_pct / Decimal("100")
-                            vol = (pos.volume * pct).quantize(Decimal("0.01"))
-                            vol = max(Decimal("0.01"), min(vol, pos.volume))
-
-                        res = await self.broker.close_position(pos.ticket, vol)
-                        if res.success and action.action_type.value == "PARTIAL_CLOSE":
-                            self._tp1_processed_tickets.add(pos.ticket)
-                            already_partial_closed_tickets.add(pos.ticket)
-                        status_icon = "✅" if res.success else "❌"
-                        action_name = f"Chốt {action.percentage or 50}%" if action.action_type.value == "PARTIAL_CLOSE" else "Đóng Lệnh"
-                        close_msg = (
-                            f"{status_icon} <b>Position Management: {action_name}</b>\n"
-                            f"━━━━━━━━━━━━━━━━\n"
-                            f"{reply_tag}"
-                            f"• <b>{pos.symbol}</b> (Ticket: <code>{pos.ticket}</code>)\n"
-                            f"• Khối lượng: <b>{vol} lot</b> | Kết quả: {res.comment}\n"
-                            f"⏱ {now_str}"
-                        )
-                        await self.notify(self.format_notification(close_msg, message_link))
-                        if res.success and action.action_type.value == "CLOSE":
-                            await self.cancel_dual_entry_pending_orders_on_close(
-                                pos.ticket, reason="Tín hiệu Đóng lệnh"
-                            )
-                        
-                        await self._insert_management_action(
-                            signal_db_id=signal_db_id,
-                            mt5_ticket=pos.ticket,
-                            action_type=action.action_type.value,
-                            parameters={"volume": float(vol), "reply_to_msg_id": reply_to_msg_id},
-                            status="EXECUTED" if res.success else "FAILED",
-                            result={"comment": res.comment, "retcode": res.retcode}
-                        )
-
-                        # Auto Breakeven on partial close if enabled
-                        if (
-                            res.success
-                            and action.action_type.value == "PARTIAL_CLOSE"
-                            and self.risk_config.auto_breakeven_on_partial
-                        ):
-                            be_sl = vwap_price + self.risk_config.breakeven_offset_price
-                            be_res = await self.broker.modify_position(pos.ticket, sl=be_sl)
-                            be_icon = "✅" if be_res.success else "⚠️"
-                            be_msg = (
-                                f"{be_icon} <b>Auto Breakeven on Partial</b>\n"
-                                f"━━━━━━━━━━━━━━━━\n"
-                                f"{reply_tag}"
-                                f"• Ticket: <code>{pos.ticket}</code> | SL mới: <code>{be_sl}</code>\n"
-                                f"• Kết quả: {be_res.comment}\n"
-                                f"⏱ {now_str}"
-                            )
-                            await self.notify(self.format_notification(be_msg, message_link))
-                            await self._insert_management_action(
-                                signal_db_id=signal_db_id,
-                                mt5_ticket=pos.ticket,
-                                action_type="AUTO_BREAKEVEN",
-                                parameters={"sl": float(be_sl), "reply_to_msg_id": reply_to_msg_id},
-                                status="EXECUTED" if be_res.success else "FAILED",
-                                result={"comment": be_res.comment, "retcode": be_res.retcode}
-                            )
-
-                    elif action.action_type.value in ("MOVE_SL", "BREAKEVEN"):
-                        new_sl = vwap_price + self.risk_config.breakeven_offset_price
-                        res = await self.broker.modify_position(pos.ticket, sl=new_sl)
-                        status_icon = "✅" if res.success else "❌"
-                        move_msg = (
-                            f"{status_icon} <b>Position Management: Dời SL về Entry Hòa Vốn</b>\n"
-                            f"━━━━━━━━━━━━━━━━\n"
-                            f"{reply_tag}"
-                            f"• Ticket: <code>{pos.ticket}</code> ({pos.symbol})\n"
-                            f"• SL mới: <code>{new_sl}</code> (Hòa vốn)\n"
-                            f"• Kết quả: {res.comment}\n"
-                            f"⏱ {now_str}"
-                        )
-                        await self.notify(self.format_notification(move_msg, message_link))
-                        await self._insert_management_action(
-                            signal_db_id=signal_db_id,
-                            mt5_ticket=pos.ticket,
-                            action_type=action.action_type.value,
-                            parameters={"sl": float(new_sl), "reply_to_msg_id": reply_to_msg_id},
-                            status="EXECUTED" if res.success else "FAILED",
-                            result={"comment": res.comment, "retcode": res.retcode}
-                        )
+            await self.process_management_signal(signal, signal_db_id, reply_to_msg_id, message_link)
 
     # -------------------------------------------------------------
     # Admin Control Operations (called by Personal Telegram Bot)
@@ -1538,22 +1224,16 @@ class TradingService:
 
     async def get_status_summary(self) -> dict[str, Any]:
         """Fetch system and account status."""
-        acc = await self.broker.get_account_info()
-        positions = await self.broker.get_positions()
-        orders = await self.broker.get_pending_orders()
-        connected = await self.broker.is_connected()
+        context = await self.build_risk_context()
+        acc = context.account
         return {
-            "bot_enabled": self.risk_config.enabled,
-            "connected": connected,
-            "login": acc.login,
-            "server": acc.server,
-            "balance": acc.balance,
-            "equity": acc.equity,
-            "margin": acc.margin,
-            "free_margin": acc.free_margin,
-            "open_positions_count": len(positions),
-            "pending_orders_count": len(orders),
-            "currency": acc.currency,
+            "bot_enabled": self.risk_config.enabled, "connected": context.broker_connected,
+            "login": acc.login, "server": acc.server, "balance": acc.balance, "equity": acc.equity,
+            "margin": acc.margin, "free_margin": acc.free_margin,
+            "open_positions_count": len(context.open_positions), "pending_orders_count": context.pending_order_count,
+            "currency": acc.currency, "today_pnl": context.today_realized_pnl,
+            "daily_available": context.daily_history_available,
+            "awaiting_approval": len(self._pending_overrides),
         }
 
     async def close_position_by_ticket(
@@ -1576,27 +1256,6 @@ class TradingService:
                 await self.cancel_dual_entry_pending_orders_on_close(pos.ticket, reason="Đóng tất cả")
         return results
 
-    async def partial_close_positions(
-        self,
-        percentage: Decimal = Decimal("50"),
-        symbol: str | None = None,
-    ) -> list[tuple[PositionInfo, OrderResult, Decimal]]:
-        """Partially close all open positions (or filtered by symbol) by a given percentage."""
-        positions = await self.broker.get_positions()
-        if symbol:
-            clean_sym = symbol.upper().replace("#", "").strip()
-            positions = [p for p in positions if p.symbol.upper().startswith(clean_sym)]
-
-        results: list[tuple[PositionInfo, OrderResult, Decimal]] = []
-        pct = percentage / Decimal("100")
-        for pos in positions:
-            vol = (pos.volume * pct).quantize(Decimal("0.01"))
-            vol = max(Decimal("0.01"), min(vol, pos.volume))
-            res = await self.broker.close_position(pos.ticket, vol)
-            results.append((pos, res, vol))
-        return results
-
-
     async def modify_sl_tp(
         self,
         ticket: int,
@@ -1605,23 +1264,6 @@ class TradingService:
     ) -> OrderResult:
         """Modify SL/TP on an active position."""
         return await self.broker.modify_position(ticket, sl, tp)
-
-    async def move_to_breakeven(self, ticket: int) -> OrderResult:
-        """Move position stop loss to middle (VWAP) entry price of all positions for the symbol."""
-        positions = await self.broker.get_positions()
-        target = next((p for p in positions if p.ticket == ticket), None)
-        if not target:
-            return OrderResult(success=False, comment=f"Ticket {ticket} not found")
-            
-        symbol_positions = [p for p in positions if p.symbol == target.symbol]
-        total_vol = sum(p.volume for p in symbol_positions)
-        vwap_price = target.open_price
-        if total_vol > 0:
-            vwap_price = sum(p.open_price * p.volume for p in symbol_positions) / total_vol
-            vwap_price = vwap_price.quantize(Decimal("0.00001"))
-            
-        new_sl = vwap_price + self.risk_config.breakeven_offset_price
-        return await self.broker.modify_position(ticket, sl=new_sl)
 
     async def get_closed_deals(
         self, days: int = 7, limit: int = 15
@@ -1983,19 +1625,24 @@ class TradingService:
                 configs = result.scalars().all()
 
                 if configs:
+                    updates = {}
                     for cfg in configs:
                         val = cfg.value
                         if isinstance(val, dict):
-                            for k, v in val.items():
-                                if hasattr(self.risk_config, k):
-                                    self.risk_config.update_field(k, v)
-                        elif hasattr(self.risk_config, cfg.key):
-                            self.risk_config.update_field(cfg.key, val)
+                            updates.update({k: v for k, v in val.items() if k in RiskConfig.model_fields})
+                        elif cfg.key in RiskConfig.model_fields:
+                            updates[cfg.key] = val
+                    updates["breakeven_mode"] = "ticket"  # Migrate legacy setup averages.
+                    candidate = self.risk_config.with_updates(updates)
+                    for key, value in candidate.model_dump().items():
+                        setattr(self.risk_config, key, value)
+                    set_broker_utc_offset_hours(self.risk_config.broker_utc_offset_hours)
 
                     logger.info("loaded_risk_config_from_db", enabled=self.risk_config.enabled)
                     return self.risk_config
         except Exception as e:
             logger.warning("load_risk_config_from_db_failed", error=str(e))
+            self.risk_config.enabled = False
         return self.risk_config
 
     async def save_risk_config_to_db(self, updated_by: str = "SYSTEM") -> bool:
@@ -2029,6 +1676,13 @@ class TradingService:
                 ("risk", "position_management"): {
                     "default_partial_close_percent": float(self.risk_config.default_partial_close_percent),
                     "auto_breakeven_on_partial": bool(self.risk_config.auto_breakeven_on_partial),
+                    "breakeven_mode": self.risk_config.breakeven_mode,
+                    "breakeven_only_improve": self.risk_config.breakeven_only_improve,
+                    "require_explicit_close": self.risk_config.require_explicit_close,
+                    "generic_partial_uses_default": self.risk_config.generic_partial_uses_default,
+                    "tp1_enabled": self.risk_config.tp1_enabled,
+                    "tp1_min_volume_action": self.risk_config.tp1_min_volume_action,
+                    "auto_cancel_pending_on_full_close": self.risk_config.auto_cancel_pending_on_full_close,
                     "breakeven_offset_price": float(self.risk_config.breakeven_offset_price),
                     "allow_multiple_partial_closes": bool(self.risk_config.allow_multiple_partial_closes),
                 },
@@ -2067,25 +1721,27 @@ class TradingService:
             return False
 
     async def update_config_key(self, key: str, value: Any, updated_by: str = "ADMIN") -> bool:
-        """Update a config field in memory and persist immediately to database."""
-        if not self.risk_config.update_field(key, value):
-            return False
-        return await self.save_risk_config_to_db(updated_by=updated_by)
+        return (await self.update_config_keys({key: value}, updated_by)).get(key, False)
 
-    async def update_config_keys(
-        self, updates: dict[str, Any], updated_by: str = "ADMIN"
-    ) -> dict[str, bool]:
-        """Update multiple config fields in memory and persist once to database."""
-        results: dict[str, bool] = {}
-        any_success = False
-        for k, v in updates.items():
-            ok = self.risk_config.update_field(k, v)
-            results[k] = ok
-            if ok:
-                any_success = True
-        if any_success:
-            await self.save_risk_config_to_db(updated_by=updated_by)
-        return results
+    async def update_config_keys(self, updates: dict[str, Any], updated_by: str = "ADMIN",
+                                 expected: dict | None = None) -> dict[str, bool]:
+        """Validate a complete batch and roll back memory if persistence fails."""
+        async with self._execution_lock:
+            if expected is not None and self.risk_config.model_dump(mode="json") != expected:
+                return dict.fromkeys(updates, False)
+            try:
+                candidate = self.risk_config.with_updates(updates)
+            except (ValueError, TypeError):
+                return dict.fromkeys(updates, False)
+            previous = self.risk_config.model_dump()
+            for key, value in candidate.model_dump().items():
+                setattr(self.risk_config, key, value)
+            if not await self.save_risk_config_to_db(updated_by=updated_by):
+                for key, value in previous.items():
+                    setattr(self.risk_config, key, value)
+                return dict.fromkeys(updates, False)
+            set_broker_utc_offset_hours(self.risk_config.broker_utc_offset_hours)
+            return dict.fromkeys(updates, True)
 
     async def add_or_update_management_rule(
         self,

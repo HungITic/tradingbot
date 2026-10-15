@@ -67,6 +67,12 @@ async def init_db() -> None:
             await conn.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS tp1 NUMERIC(15, 5);"))
             await conn.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS tp2 NUMERIC(15, 5);"))
             await conn.execute(text("ALTER TABLE parsed_signals ADD COLUMN IF NOT EXISTS take_profit_2 NUMERIC(15, 5);"))
+            await conn.execute(text("""INSERT INTO signal_receipts (chat_id, message_id)
+SELECT DISTINCT src.chat_id, sig.telegram_message_id
+FROM signals sig JOIN signal_sources src ON src.id = sig.source_id
+JOIN orders ord ON ord.signal_id = sig.id
+WHERE sig.telegram_message_id IS NOT NULL AND ord.mt5_ticket IS NOT NULL
+ON CONFLICT DO NOTHING"""))
     logger.info("database_connected", url=settings.db.url.split("@")[-1])
 
 
