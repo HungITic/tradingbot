@@ -138,6 +138,15 @@ async def test_exit_report_is_per_deal_with_net_components_and_correct_link(serv
     assert 'Kết thúc PnL' not in text
     assert 'https://t.me/example/1' in text
     assert 'TP1' in reason
+    assert 'Mã lệnh' in text and '<code>#1</code>' in text
+    assert '<code>#100</code>' not in text
+
+
+@pytest.mark.asyncio
+async def test_exit_without_position_id_does_not_show_deal_as_order_id(service):
+    text, _ = await service.format_exit_notification(deal(4, position_id=0))
+    assert 'Chưa xác định' not in text
+    assert '<code>#100</code>' not in text and '<code>#200</code>' not in text
 
 
 @pytest.mark.asyncio

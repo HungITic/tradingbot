@@ -184,7 +184,7 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
                                 f"🔔 <b>Lệnh Chờ Đã Khớp</b>\n"
                                 f"━━━━━━━━━━━━━━━━\n"
                                 f"• <b>{deal.symbol}</b> {deal.deal_type} <b>{deal.volume} lot</b> @ <code>{deal.price}</code>\n"
-                                f"• Ticket: <code>{deal.ticket}</code> (Lệnh chờ: <code>{deal.order}</code>)\n"
+                                f"• Mã lệnh: <code>#{deal.position_id or deal.order}</code>\n"
                                 f"⏱ {deal_time_str}"
                             )
                             await self.notify(self.format_notification(filled_msg, order_link))
@@ -1245,6 +1245,47 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
             logger.warning("get_closed_deals_failed", error=str(e))
             return []
 
+    async def history_signal_link(self, position: ClosedPositionInfo) -> str | None:
+        """Resolve the opening signal by exact position/order associations, including after restart."""
+        tickets = {position.ticket, *position.opening_order_tickets}
+        for ticket in sorted(tickets):
+            link = self._order_message_links.get(ticket)
+            signal_id = self._ticket_to_signal_db_id.get(ticket)
+            link = link or self._signal_message_links.get(signal_id)
+            if link:
+                return link
+
+        from sqlalchemy import or_, select
+        from app.config.database import get_session
+        from app.models.trade import Order as DBOrder, Position as DBPosition
+        from app.models.signal import Signal as DBSignal, ParsedSignal as DBParsedSignal, SignalSource
+        from app.telegram.utils import construct_telegram_message_link, parse_telegram_message_link
+
+        try:
+            async with get_session() as session:
+                rows = await session.execute(
+                    select(DBParsedSignal.extra_metadata, SignalSource.chat_id, DBSignal.telegram_message_id)
+                    .select_from(DBOrder)
+                    .join(DBSignal, DBSignal.id == DBOrder.signal_id)
+                    .outerjoin(DBPosition, DBPosition.order_id == DBOrder.id)
+                    .outerjoin(DBParsedSignal, DBParsedSignal.signal_id == DBSignal.id)
+                    .outerjoin(SignalSource, SignalSource.id == DBSignal.source_id)
+                    .where(or_(DBOrder.mt5_ticket.in_(tickets), DBPosition.mt5_ticket == position.ticket))
+                    .distinct()
+                )
+                links = set()
+                for metadata, chat_id, message_id in rows.all():
+                    link = (metadata or {}).get("message_link")
+                    if not isinstance(link, str) or parse_telegram_message_link(link)[1] is None:
+                        link = construct_telegram_message_link(chat_id, message_id)
+                    if link:
+                        links.add(link)
+                # Ambiguous associations must not send the user to a different signal.
+                return links.pop() if len(links) == 1 else None
+        except Exception as exc:
+            logger.warning("history_signal_link_unavailable", ticket=position.ticket, error=str(exc))
+            return None
+
     async def get_closed_positions(
         self, days: int = 7, limit: int | None = 15, *,
         start_time: datetime | None = None, end_time: datetime | None = None,
@@ -1408,6 +1449,7 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
                     "deals_count": deals_count,
                     "is_fully_closed": is_fully_closed,
                     "partial_deals": partial_deals,
+                    "opening_order_tickets": tuple(sorted({d.order for d in in_deals if d.order > 0})),
                     "comment": comment,
                 }
             )
@@ -1478,6 +1520,7 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
                 total_volume=item["total_volume"],
                 currency=item["currency"],
                 partial_deals=item["partial_deals"],
+                opening_order_tickets=item["opening_order_tickets"],
                 comment=item["comment"],
             )
             for item in aggregated

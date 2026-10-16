@@ -300,8 +300,8 @@ class PersonalTelegramBot(TelegramConsoleMixin):
         if not positions:
             cards.append("Chưa có lệnh chốt trong kỳ này.")
         keyboard = build_history_keyboard(days, page, pages)
-        details = [[InlineKeyboardButton(f"#{pos.ticket} · Chi tiết", callback_data=f"history_detail_{days}_{page}_{pos.ticket}_0")
-                    for pos in visible]] if visible else []
+        details = [[InlineKeyboardButton(f"Lệnh {page * 3 + index + 1} · Chi tiết", callback_data=f"history_detail_{days}_{page}_{pos.ticket}_0")
+                    for index, pos in enumerate(visible)]] if visible else []
         return join_cards(cards), InlineKeyboardMarkup(details + list(keyboard.inline_keyboard))
 
     async def _format_history_detail(self, days: int | str, page: int, ticket: int, deal_page: int = 0):
@@ -321,8 +321,13 @@ class PersonalTelegramBot(TelegramConsoleMixin):
                 field("Commission", money(pos.commission, pos.currency, signed=True))),
             section(f"Các lần chốt · {deal_page + 1}/{pages}", *[
                 f"{format_vietnam_time(d.time)} · {number(d.volume)} lot @ {price(d.price)}\n"
-                f"<code>#{d.ticket}</code> · {escape(money(d.profit, pos.currency, signed=True))}"
+                f"{escape(money(d.profit, pos.currency, signed=True))}"
                 for d in deals[deal_page * 5:deal_page * 5 + 5]]) if deals else "Chưa có chi tiết từng lần chốt."]
+        signal_link = await self.service.history_signal_link(pos)
+        if signal_link:
+            blocks.append(f'🔗 <a href="{escape(signal_link, quote=True)}">Xem tin nhắn signal gốc</a>')
+        else:
+            blocks.append("Chưa tìm thấy tin nhắn signal gốc của lệnh này.")
         nav = []
         if deal_page:
             nav.append(InlineKeyboardButton("← Mới hơn", callback_data=f"history_detail_{days}_{page}_{ticket}_{deal_page - 1}"))

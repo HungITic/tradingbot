@@ -158,6 +158,7 @@ class ClosedPositionInfo:
     currency: str = "USD"
     partial_deals: list[PartialCloseDealInfo] = field(default_factory=list)
     comment: str = ""
+    opening_order_tickets: tuple[int, ...] = ()
 
     def __post_init__(self):
         if self.total_volume is None or self.total_volume <= Decimal("0"):

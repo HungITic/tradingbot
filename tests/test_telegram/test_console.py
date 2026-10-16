@@ -292,13 +292,47 @@ async def test_history_detail_bounds_partial_deals_and_preserves_list_page(bot):
     bot.service.get_closed_positions = AsyncMock(return_value=[closed_position(42, deals=17)])
     text, keyboard = await bot._format_history_detail(30, 3, 42)
     assert 'Các lần chốt · 1/4' in text
-    assert '#16' in text and '#12' in text and '#11' not in text
+    assert text.count('0.01 lot @') == 5
+    assert '<code>#16</code>' not in text
     assert len(text) < 4096
     callbacks = [b.callback_data for row in keyboard.inline_keyboard for b in row]
     assert 'history_detail_30_3_42_1' in callbacks and 'history_30_3' in callbacks
     last, keyboard = await bot._format_history_detail(30, 3, 42, 999)
-    assert 'Các lần chốt · 4/4' in last and '#0' in last
+    assert 'Các lần chốt · 4/4' in last and last.count('0.01 lot @') == 2
     assert 'history_detail_30_3_42_4' not in [b.callback_data for row in keyboard.inline_keyboard for b in row]
+
+
+@pytest.mark.asyncio
+async def test_history_detail_links_to_original_signal_through_opening_order(bot):
+    from dataclasses import replace
+    pos = replace(closed_position(42, deals=2), opening_order_tickets=(100,))
+    bot.service.get_closed_positions = AsyncMock(return_value=[pos])
+    bot.service._order_message_links[100] = 'https://t.me/signals/12'
+    text, _ = await bot._format_history_detail(30, 0, 42)
+    assert '<a href="https://t.me/signals/12">Xem tin nhắn signal gốc</a>' in text
+    assert '<code>#0</code>' not in text and '<code>#1</code>' not in text
+
+
+@pytest.mark.asyncio
+async def test_history_signal_link_survives_restart_and_reconstructs_missing_url(bot):
+    from contextlib import asynccontextmanager
+    from unittest.mock import patch
+    session = AsyncMock()
+    session.execute.return_value = MagicMock()
+    session.execute.return_value.all.return_value = [(None, -1001234567890, 12)]
+
+    @asynccontextmanager
+    async def scope():
+        yield session
+
+    with patch('app.config.database.get_session', scope):
+        assert await bot.service.history_signal_link(closed_position(42)) == 'https://t.me/c/1234567890/12'
+        session.execute.return_value.all.return_value = [
+            ({'message_link': 'https://t.me/signals/12'}, None, None)]
+        assert await bot.service.history_signal_link(closed_position(42)) == 'https://t.me/signals/12'
+        session.execute.return_value.all.return_value.append(
+            ({'message_link': 'https://t.me/signals/13'}, None, None))
+        assert await bot.service.history_signal_link(closed_position(42)) is None
 
 
 @pytest.mark.asyncio

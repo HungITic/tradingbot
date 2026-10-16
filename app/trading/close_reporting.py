@@ -100,8 +100,8 @@ class CloseReportingMixin:
             side = "SELL" if deal.deal_type == "BUY" else "BUY" if deal.deal_type == "SELL" else deal.deal_type
         realized = deal.profit + deal.swap + deal.commission
         blocks = [heading(title, format_vietnam_time(deal.time, "%H:%M:%S · %d/%m/%Y")),
-            section(f"{deal.symbol} · {side}", field("Vị thế", f"#{deal.position_id}" if deal.position_id > 0 else "Chưa xác định", code=True),
-                field("Deal", f"#{deal.ticket}", code=True)),
+            section(f"{deal.symbol} · {side}",
+                *([field("Mã lệnh", f"#{deal.position_id}", code=True)] if deal.position_id > 0 else [])),
             section("KẾT QUẢ LẦN CHỐT NÀY",
                 f"{'🟢' if realized >= 0 else '🔴'} <b>PnL lần chốt: {escape(money(realized, currency, signed=True))}</b>",
                 field("Lãi/lỗ giá", money(deal.profit, currency, signed=True)),
