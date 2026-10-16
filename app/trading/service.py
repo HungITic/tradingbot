@@ -1477,6 +1477,24 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
             return result[:limit]
         return result
 
+    async def get_monthly_volume(self) -> dict[str, Any]:
+        from app.trading.volume import monthly_volume
+        from app.core.timezone import to_vietnam_datetime
+        now = now_vietnam()
+        start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        try:
+            deals = await self.broker.get_history_deals(start_time=start)
+            history = None
+            if any(d.entry == "INOUT" and start <= to_vietnam_datetime(d.time) <= now for d in deals):
+                try:
+                    history = await self.broker.get_history_deals(start_time=datetime(1970, 1, 1, tzinfo=timezone.utc))
+                except Exception as exc:
+                    logger.warning("monthly_volume_reversal_history_unavailable", error=str(exc))
+            return monthly_volume(deals, now, history)
+        except Exception as exc:
+            logger.warning("monthly_volume_unavailable", error=str(exc))
+            return {"available": False, "month": start.strftime("%m/%Y")}
+
     async def get_performance_summary(self, days: int = 7) -> dict[str, Any]:
         """Compute performance metrics (win/loss, profit factor, net pnl) aggregated by position over the given days."""
         try:

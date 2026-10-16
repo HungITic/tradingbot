@@ -81,6 +81,20 @@ class TelegramConsoleMixin:
         except Exception:
             return ""
 
+    async def monthly_volume_block(self):
+        summary = await self.service.get_monthly_volume()
+        title = f"KHỐI LƯỢNG THÁNG {summary['month']}"
+        if not summary["available"]:
+            return section(title, "Chưa đọc được lịch sử MT5; hãy cập nhật lại.")
+        total_lots = number(summary["total"], minimum=2)
+        lines = [field("Mở lệnh", f"{number(summary['opened'], minimum=2)} lot"),
+                 field("Đóng lệnh", f"{number(summary['closed'], minimum=2)} lot"),
+                 f"<b>{field('Tổng hai chiều', total_lots + ' lot')}</b>"]
+        if summary['unallocated']:
+            lines.append(field("Chưa tách mở/đóng (đảo chiều)", f"{number(summary['unallocated'])} lot"))
+        lines.append("<i>Toàn tài khoản · Tháng dương lịch, giờ Việt Nam.</i>")
+        return section(title, *lines)
+
     async def status_view(self):
         from app.telegram.signal_listener import signal_listener
         summary = await self.service.get_status_summary()
@@ -96,6 +110,7 @@ class TelegramConsoleMixin:
                 field("Số dư", money(summary['balance'], currency)), field("Equity", money(summary['equity'], currency)),
                 field("Khả dụng", money(summary['free_margin'], currency))),
             section("HÔM NAY · GIỜ VIỆT NAM", field("Lãi/lỗ đã chốt", pnl)),
+            await self.monthly_volume_block(),
             section("CẦN THEO DÕI", field("Vị thế đang mở", summary['open_positions_count']),
                 field("Lệnh chờ", summary['pending_orders_count']), field("Tín hiệu chờ duyệt", summary['awaiting_approval']))]
         return join_cards(blocks), build_status_keyboard(summary["bot_enabled"])

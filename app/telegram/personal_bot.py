@@ -396,6 +396,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
                 field("Hòa vốn", stats['breakeven_trades']), field("Tỷ lệ thắng", f"{stats['win_rate']}%")),
             section("LÃI VÀ LỖ", field("Tổng lãi", money(stats['total_profit'], currency, signed=True)),
                 field("Tổng lỗ", money(stats['total_loss'], currency, signed=True)), field("Profit Factor", pf_str)),
+            await self.monthly_volume_block(),
             section("LỆNH NỔI BẬT", field("Lãi lớn nhất", money(stats['best_trade'], currency, signed=True)),
                 field("Lỗ lớn nhất", money(stats['worst_trade'], currency, signed=True)))])
         keyboard = build_stats_keyboard(days)
