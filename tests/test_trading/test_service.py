@@ -1636,7 +1636,10 @@ async def test_personal_bot_format_history_message(mock_broker):
     service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     bot = PersonalTelegramBot(service=service)
 
-    msg, keyboard = await bot._format_history_message(days=7)
+    from unittest.mock import patch
+    from app.core.timezone import VN_TZ
+    with patch('app.telegram.history_periods.now_vietnam', return_value=datetime(2026, 10, 4, tzinfo=VN_TZ)):
+        msg, keyboard = await bot._format_history_message(days=7)
 
     # Summary stays compact; fees and individual exits are behind the detail button.
     assert "XAUUSD · BUY" in msg
@@ -1649,7 +1652,8 @@ async def test_personal_bot_format_history_message(mock_broker):
     assert "2,660.00" not in msg
     assert "history_detail_7_0_888_0" in [b.callback_data for row in keyboard.inline_keyboard for b in row]
 
-    detail, keyboard = await bot._format_history_detail(7, 0, 888)
+    with patch('app.telegram.history_periods.now_vietnam', return_value=datetime(2026, 10, 4, tzinfo=VN_TZ)):
+        detail, keyboard = await bot._format_history_detail(7, 0, 888)
     assert "Commission" in detail
     assert "0.05 lot @ 2,660.00" in detail
     assert "0.05 lot @ 2,670.00" in detail

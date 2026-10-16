@@ -1246,7 +1246,8 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
             return []
 
     async def get_closed_positions(
-        self, days: int = 7, limit: int | None = 15
+        self, days: int = 7, limit: int | None = 15, *,
+        start_time: datetime | None = None, end_time: datetime | None = None,
     ) -> list[ClosedPositionInfo]:
         """
         Retrieve closed positions aggregated across all partial exit deals.
@@ -1256,7 +1257,8 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
         aggregate profit, swap, commission, net PnL, and original position type (BUY/SELL).
         """
         try:
-            deals = await self.broker.get_history_deals(days=days)
+            deals = (await self.broker.get_history_deals(start_time=start_time) if start_time is not None
+                     else await self.broker.get_history_deals(days=days))
         except Exception as e:
             logger.warning("get_closed_positions_history_failed", error=str(e))
             return []
@@ -1300,18 +1302,27 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
 
         missing_entry_pos_ids: list[int] = []
         aggregated: list[dict[str, Any]] = []
+        from app.core.timezone import to_vietnam_datetime
+
+        def in_period(deal):
+            # MT5 pads history queries by a day at each end. Filter each exit
+            # before aggregation so volume, PnL and partial details share the range.
+            time = to_vietnam_datetime(deal.time)
+            return ((start_time is None or time >= to_vietnam_datetime(start_time))
+                    and (end_time is None or time < to_vietnam_datetime(end_time)))
 
         for pos_id, p_deals in grouped_deals.items():
             out_deals = [
                 d
                 for d in p_deals
-                if d.entry in ("OUT", "INOUT", "OUT_BY")
-                or (d.profit != Decimal("0") and d.entry != "IN")
+                if in_period(d) and (d.entry in ("OUT", "INOUT", "OUT_BY")
+                or (d.profit != Decimal("0") and d.entry != "IN"))
             ]
             if not out_deals:
                 continue
 
-            in_deals = [d for d in p_deals if d.entry == "IN"]
+            in_deals = [d for d in p_deals if d.entry == "IN"
+                        and (end_time is None or to_vietnam_datetime(d.time) < to_vietnam_datetime(end_time))]
 
             total_vol = sum((d.volume for d in out_deals), Decimal("0"))
             if total_vol <= Decimal("0"):
@@ -1322,8 +1333,8 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
             close_price = (weighted_close_sum / total_vol).quantize(Decimal("0.00001"))
 
             profit = sum((d.profit for d in out_deals), Decimal("0"))
-            swap = sum((d.swap for d in p_deals), Decimal("0"))
-            commission = sum((d.commission for d in p_deals), Decimal("0"))
+            swap = sum((d.swap for d in p_deals if in_period(d)), Decimal("0"))
+            commission = sum((d.commission for d in p_deals if in_period(d)), Decimal("0"))
             net_pnl = profit + swap + commission
 
             symbol = out_deals[0].symbol or (in_deals[0].symbol if in_deals else "")

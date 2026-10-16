@@ -267,7 +267,9 @@ async def test_history_pages_keep_latest_near_controls_and_reach_all_records(bot
     callbacks = [b.callback_data for row in keyboard.inline_keyboard for b in row]
     assert 'history_30_1' in callbacks and 'history_30_-1' not in callbacks
     assert 'history_detail_30_0_20_0' in callbacks
-    bot.service.get_closed_positions.assert_awaited_with(days=30, limit=None)
+    args = bot.service.get_closed_positions.call_args.kwargs
+    assert args['limit'] is None
+    assert (args['end_time'] - args['start_time']).days == 30
     last, keyboard = await bot._format_history_message(30, 999)
     assert 'Trang 7/7' in last and '#2' in last and '#1' in last
     callbacks = [b.callback_data for row in keyboard.inline_keyboard for b in row]

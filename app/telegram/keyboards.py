@@ -95,13 +95,13 @@ def build_risk_config_keyboard(config: RiskConfig, group: str | None = None) -> 
     return InlineKeyboardMarkup(rows)
 
 
-def build_history_keyboard(days: int = 7, page: int = 0, pages: int = 1) -> InlineKeyboardMarkup:
+def build_history_keyboard(days: int | str = "today", page: int = 0, pages: int = 1) -> InlineKeyboardMarkup:
     """Build interactive time filter buttons for trade history."""
     buttons = [
         [
-            InlineKeyboardButton("24 giờ", callback_data="history_1"),
-            InlineKeyboardButton("📅 7 Ngày", callback_data="history_7"),
-            InlineKeyboardButton("📅 30 Ngày", callback_data="history_30"),
+            InlineKeyboardButton("Hôm nay", callback_data="history_today_0"),
+            InlineKeyboardButton("Hôm qua", callback_data="history_yesterday_0"),
+            InlineKeyboardButton("Tháng này", callback_data="history_month_0"),
         ],
         [
             InlineKeyboardButton("📈 Thống Kê Win/Loss", callback_data="view_stats"),

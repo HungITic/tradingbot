@@ -26,6 +26,7 @@ from telegram.ext import (
     filters,
 )
 
+from app.telegram.history_periods import history_period
 from app.telegram.presentation import heading, section, field, money, number, price, history_card, join_cards
 from app.config.settings import settings
 from app.telegram.keyboards import (
@@ -288,12 +289,13 @@ class PersonalTelegramBot(TelegramConsoleMixin):
         if update.effective_message:
             await update.effective_message.reply_text(msg, parse_mode=ParseMode.HTML)
 
-    async def _format_history_message(self, days: int = 7, page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
-        positions = await self.service.get_closed_positions(days=days, limit=None)
+    async def _format_history_message(self, days: int | str = "today", page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
+        start, end, label = history_period(days)
+        positions = await self.service.get_closed_positions(limit=None, start_time=start, end_time=end)
         pages = max(1, (len(positions) + 2) // 3)
         page = min(max(page, 0), pages - 1)
         visible = positions[page * 3:page * 3 + 3]
-        cards = [heading("📜 Lịch sử lệnh", f"{days} ngày · Trang {page + 1}/{pages} · {len(positions)} vị thế · Mới nhất trước · Giờ VN")]
+        cards = [heading("📜 Lịch sử lệnh", f"{label} · Trang {page + 1}/{pages} · {len(positions)} vị thế · Mới nhất trước · Giờ VN")]
         cards.extend(history_card(pos) for pos in visible)
         if not positions:
             cards.append("Chưa có lệnh chốt trong kỳ này.")
@@ -302,8 +304,9 @@ class PersonalTelegramBot(TelegramConsoleMixin):
                     for pos in visible]] if visible else []
         return join_cards(cards), InlineKeyboardMarkup(details + list(keyboard.inline_keyboard))
 
-    async def _format_history_detail(self, days: int, page: int, ticket: int, deal_page: int = 0):
-        positions = await self.service.get_closed_positions(days=days, limit=None)
+    async def _format_history_detail(self, days: int | str, page: int, ticket: int, deal_page: int = 0):
+        start, end, label = history_period(days)
+        positions = await self.service.get_closed_positions(limit=None, start_time=start, end_time=end)
         pos = next((pos for pos in positions if pos.ticket == ticket), None)
         back = [InlineKeyboardButton("← Danh sách lệnh", callback_data=f"history_{days}_{page}")]
         if pos is None:
@@ -312,7 +315,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
         deals = sorted(pos.partial_deals, key=lambda d: (to_vietnam_datetime(d.time), d.ticket), reverse=True)
         pages = max(1, (len(deals) + 4) // 5)
         deal_page = min(max(deal_page, 0), pages - 1)
-        blocks = [heading("📜 Chi tiết lệnh"), history_card(pos),
+        blocks = [heading("📜 Chi tiết lệnh", label + " · Giờ Việt Nam"), history_card(pos),
             section("Lãi/lỗ đã ghi nhận", field("Lãi/lỗ giá", money(pos.profit, pos.currency, signed=True)),
                 field("Swap", money(pos.swap, pos.currency, signed=True)),
                 field("Commission", money(pos.commission, pos.currency, signed=True))),
@@ -351,12 +354,11 @@ class PersonalTelegramBot(TelegramConsoleMixin):
 
     @admin_only
     async def cmd_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        days = 7
-        if context.args:
-            try:
-                days = max(1, int(context.args[0]))
-            except ValueError:
-                pass
+        days = context.args[0] if context.args else "today"
+        try:
+            history_period(days)
+        except (ValueError, TypeError):
+            days = "today"
         msg, keyboard = await self._format_history_message(days)
         if update.effective_message:
             await update.effective_message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=keyboard)
@@ -1097,7 +1099,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
             text, keyboard = await self.status_view()
             await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
         elif data == "view_history":
-            msg, keyboard = await self._format_history_message(7)
+            msg, keyboard = await self._format_history_message("today")
             await query.edit_message_text(msg, parse_mode=ParseMode.HTML, reply_markup=keyboard)
         elif data.startswith("override_"):
             parts = data.split("_")
@@ -1130,21 +1132,22 @@ class PersonalTelegramBot(TelegramConsoleMixin):
         elif data.startswith("history_detail_"):
             try:
                 _, _, days, page, ticket, deal_page = data.split("_")
-                msg, keyboard = await self._format_history_detail(max(1, int(days)), int(page), int(ticket), int(deal_page))
+                msg, keyboard = await self._format_history_detail(days, int(page), int(ticket), int(deal_page))
             except (ValueError, IndexError):
                 return
             await query.edit_message_text(msg, parse_mode=ParseMode.HTML, reply_markup=keyboard)
         elif data.startswith("history_"):
             try:
-                days_filter = int(data.split("_")[1])
+                days_filter = data.split("_")[1]
+                history_period(days_filter)
             except (IndexError, ValueError):
-                days_filter = 7
+                days_filter = "today"
             parts = data.split("_")
             try:
                 page = int(parts[2]) if len(parts) > 2 else 0
             except ValueError:
                 page = 0
-            msg, keyboard = await self._format_history_message(max(1, days_filter), page)
+            msg, keyboard = await self._format_history_message(days_filter, page)
             await query.edit_message_text(msg, parse_mode=ParseMode.HTML, reply_markup=keyboard)
         elif data == "view_stats":
             msg, keyboard = await self._format_stats_message(7)
