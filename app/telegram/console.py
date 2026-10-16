@@ -11,6 +11,7 @@ from telegram.constants import ParseMode
 from app.telegram.presentation import heading, section, field, number, money, position_card, pending_card, join_cards, config_value, DIVIDER
 from app.core.timezone import format_vietnam_time, now_vietnam
 from app.telegram.keyboards import build_positions_keyboard, build_risk_config_keyboard, build_status_keyboard
+from app.telegram.configuration import CONFIG_FIELDS, CONFIG_HELP, CONFIG_GROUP_HELP
 
 MENU = ReplyKeyboardMarkup(
     [["📊 Tổng quan", "📥 Tín hiệu"], ["🗂 Kèo đang chạy", "📋 Vị thế"],
@@ -18,23 +19,6 @@ MENU = ReplyKeyboardMarkup(
     input_field_placeholder="Chọn chức năng hoặc dán link tín hiệu để xem trước",
 )
 
-CONFIG_FIELDS = {
-    "enabled": "Cho phép mở lệnh mới", "require_sl": "Bắt buộc có SL",
-    "require_tp": "Bắt buộc có TP", "enable_dual_entry": "Vào hai đầu vùng giá",
-    "max_slippage_entry": "Dung sai giá", "lot_min_entry": "Lot nhánh thứ nhất",
-    "lot_max_entry": "Lot nhánh thứ hai", "max_open_positions": "Số lệnh tối đa (gồm lệnh chờ)",
-    "default_lot": "Lot mặc định", "default_partial_close_percent": "Tỷ lệ chốt một phần (%)",
-    "auto_breakeven_on_partial": "Dời SL sau khi chốt một phần",
-    "generic_partial_uses_default": "Chốt bớt chung dùng tỷ lệ cấu hình",
-    "require_explicit_close": "Yêu cầu từ khóa đóng lệnh rõ ràng",
-    "breakeven_only_improve": "Giữ SL đang bảo vệ tốt hơn",
-    "breakeven_offset_price": "Bù giá hòa vốn (BUY cộng, SELL trừ)",
-    "tp1_enabled": "Tự xử lý TP1 khi có TP2",
-    "tp1_min_volume_action": "TP1 khi không đủ lot để chia",
-    "auto_cancel_pending_on_full_close": "Hủy nhánh chờ sau khi đóng hết vị thế",
-    "allow_multiple_partial_closes": "Cho phép chốt một phần nhiều lần",
-    "max_daily_loss_percent": "Giới hạn lỗ ngày (%)", "signal_expire_seconds": "Thời hạn tín hiệu (giây)",
-}
 POLICY_CHOICES = {
     "tp1_min_volume_action": {"breakeven": "Chỉ dời SL nếu bật tự dời", "skip": "Bỏ qua, giữ nguyên"},
 }
@@ -300,14 +284,13 @@ class TelegramConsoleMixin:
                 await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
             return True
         if data.startswith("cfg_group_"):
+            context.user_data.pop("config_field", None)
             from app.telegram.keyboards import CONFIG_SECTIONS
             group = data[len("cfg_group_"):]
             if group in CONFIG_SECTIONS:
                 text = heading(CONFIG_SECTIONS[group][0], "Chọn tham số để xem trước thay đổi")
-                if group == "sl":
-                    text += "\n\nHòa vốn dùng entry riêng từng lệnh.\nKhông tính trung bình hai entry."
-                elif group == "profit":
-                    text += "\n\nMột TP: đóng toàn bộ.\nTP1 + TP2: chốt theo tỷ lệ rồi giữ phần còn lại."
+                if group in CONFIG_GROUP_HELP:
+                    text += "\n\n" + CONFIG_GROUP_HELP[group]
                 await query.edit_message_text(text, parse_mode=ParseMode.HTML,
                     reply_markup=build_risk_config_keyboard(cfg, group))
             return True
@@ -315,6 +298,7 @@ class TelegramConsoleMixin:
             await query.edit_message_text("Hòa vốn luôn dùng entry riêng từng lệnh. Quy tắc lấy giá trung bình đã được bỏ.")
             return True
         if data.startswith("cfg_") or data in LEGACY_CONFIG:
+            context.user_data.pop("config_field", None)
             key = data[4:] if data.startswith("cfg_") else LEGACY_CONFIG[data]
             if key not in CONFIG_FIELDS:
                 return True
@@ -329,9 +313,14 @@ class TelegramConsoleMixin:
                 await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
             else:
                 context.user_data["config_field"] = {"key": key, "expires": time.monotonic() + 300}
-                await query.message.reply_text(f"⚙️ {CONFIG_FIELDS[key]}\n\nHiện tại: {config_value(value)}\n\nNhập giá trị mới hoặc gửi ‘hủy’.\nBot sẽ cho xem trước trước khi lưu.")
+                blocks = [heading("⚙️ " + CONFIG_FIELDS[key]), field("Hiện tại", config_value(value))]
+                if key in CONFIG_HELP:
+                    blocks.append(escape(CONFIG_HELP[key]))
+                blocks.append("Nhập giá trị mới hoặc gửi ‘hủy’.\nBot sẽ cho xem trước trước khi lưu.")
+                await query.message.reply_text("\n\n".join(blocks), parse_mode=ParseMode.HTML)
             return True
         if data == "view_config_risk":
+            context.user_data.pop("config_field", None)
             await query.edit_message_text("⚙️ <b>Cài đặt</b>\nChọn mục cần sửa. Mọi thay đổi đều có bước xem trước và xác nhận.",
                                           parse_mode=ParseMode.HTML, reply_markup=build_risk_config_keyboard(cfg))
             return True

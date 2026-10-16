@@ -112,5 +112,5 @@ async def test_cmd_config_batch_execution():
     assert "Lot nhánh thứ nhất" in reply_call
     assert "Lot nhánh thứ hai" in reply_call
     assert "Lot mặc định" in reply_call
-    assert "min_lot" in reply_call
-    assert "max_lot" in reply_call
+    assert "Lot tối thiểu mỗi lệnh" in reply_call
+    assert "Lot tối đa mỗi lệnh" in reply_call

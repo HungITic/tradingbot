@@ -174,3 +174,71 @@ async def test_be_button_previews_and_confirms_exact_proposal(bot):
     token = next(iter(bot._drafts))
     await bot.handle_console_callback(update, context, f'draft_ok_{token}')
     bot.service.move_to_breakeven.assert_awaited_once_with(1, expected_price=D('2650'))
+
+
+def test_settings_menu_exposes_every_editable_runtime_field_once():
+    from collections import Counter
+    from app.telegram.configuration import CONFIG_FIELDS, CONFIG_SECTIONS
+    from app.telegram.keyboards import build_risk_config_keyboard
+
+    # breakeven_mode is fixed policy, deliberately not an editable setting.
+    expected = set(RiskConfig.model_fields) - {'breakeven_mode'}
+    callbacks = [button.callback_data[4:]
+                 for group in CONFIG_SECTIONS
+                 for row in build_risk_config_keyboard(RiskConfig(), group).inline_keyboard
+                 for button in row if button.callback_data.startswith('cfg_')]
+    assert set(CONFIG_FIELDS) == expected
+    assert Counter(callbacks) == Counter({key: 1 for key in expected})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('key,value,expected', [
+    ('min_lot', '0.005', D('.005')),
+    ('max_lot', '0.1', D('.1')),
+    ('allowed_symbols', 'XAUUSD.sc, EURUSD', ['XAUUSD.SC', 'EURUSD']),
+    ('duplicate_timeout_seconds', '20', 20),
+    ('broker_utc_offset_hours', '2', 2),
+])
+async def test_added_settings_input_preview_and_confirm(bot, key, value, expected):
+    from unittest.mock import patch
+    update, context = callback()
+    await bot.handle_console_callback(update, context, f'cfg_{key}')
+    assert context.user_data['config_field']['key'] == key
+    assert 'Hiện tại' in update.callback_query.message.reply_text.call_args.args[0]
+    before = getattr(bot.service.risk_config, key)
+
+    message = SimpleNamespace(text=value, reply_text=AsyncMock())
+    typed = SimpleNamespace(effective_message=message)
+    await bot.handle_text_message.__wrapped__(bot, typed, context)
+    assert getattr(bot.service.risk_config, key) == before
+    bot.service.save_risk_config_to_db.assert_not_awaited()
+    keyboard = message.reply_text.call_args.kwargs['reply_markup']
+    with patch('app.trading.service.set_broker_utc_offset_hours'):
+        await bot.handle_console_callback(update, context, keyboard.inline_keyboard[0][0].callback_data)
+    assert getattr(bot.service.risk_config, key) == expected
+    bot.service.save_risk_config_to_db.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_require_tp_toggle_is_only_applied_after_confirmation(bot):
+    update, context = callback()
+    await bot.handle_console_callback(update, context, 'cfg_require_tp')
+    assert not bot.service.risk_config.require_tp
+    keyboard = update.callback_query.edit_message_text.call_args.kwargs['reply_markup']
+    await bot.handle_console_callback(update, context, keyboard.inline_keyboard[0][0].callback_data)
+    assert bot.service.risk_config.require_tp
+
+
+@pytest.mark.asyncio
+async def test_invalid_min_lot_keeps_existing_config_and_allows_retry(bot):
+    update, context = callback()
+    await bot.handle_console_callback(update, context, 'cfg_min_lot')
+    message = SimpleNamespace(text='0.02', reply_text=AsyncMock())
+    await bot.handle_text_message.__wrapped__(bot, SimpleNamespace(effective_message=message), context)
+    assert 'chưa hợp lệ' in message.reply_text.call_args.args[0]
+    assert bot.service.risk_config.min_lot == D('.01')
+    bot.service.save_risk_config_to_db.assert_not_awaited()
+    assert context.user_data['config_field']['key'] == 'min_lot'
+    # Returning to the menu cancels the old input so unrelated text cannot change it.
+    await bot.handle_console_callback(update, context, 'cfg_group_entry')
+    assert 'config_field' not in context.user_data

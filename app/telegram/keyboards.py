@@ -10,6 +10,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.broker.base import PositionInfo
 from app.trading.risk import RiskConfig
+from app.telegram.configuration import CONFIG_FIELDS, CONFIG_SECTIONS
 
 
 def build_status_keyboard(bot_enabled: bool) -> InlineKeyboardMarkup:
@@ -68,13 +69,6 @@ def build_positions_keyboard(positions: list[PositionInfo], page: int = 0, perce
     return InlineKeyboardMarkup(buttons)
 
 
-CONFIG_SECTIONS = {
-    "entry": ("🎯 Vào lệnh", {"enabled", "enable_dual_entry", "max_slippage_entry", "lot_min_entry", "lot_max_entry", "default_lot"}),
-    "sl": ("🛡 SL và hòa vốn", {"breakeven_offset_price", "breakeven_only_improve", "auto_breakeven_on_partial"}),
-    "profit": ("✂️ Chốt lời và nhánh lệnh", {"default_partial_close_percent", "tp1_enabled", "tp1_min_volume_action", "auto_cancel_pending_on_full_close", "allow_multiple_partial_closes"}),
-    "risk": ("⚖️ Giới hạn tài khoản", {"require_sl", "max_open_positions", "max_daily_loss_percent"}),
-    "signal": ("📥 Xử lý tín hiệu", {"generic_partial_uses_default", "require_explicit_close", "signal_expire_seconds"}),
-}
 
 
 def build_risk_config_keyboard(config: RiskConfig, group: str | None = None) -> InlineKeyboardMarkup:
@@ -84,21 +78,8 @@ def build_risk_config_keyboard(config: RiskConfig, group: str | None = None) -> 
             *[[InlineKeyboardButton(label, callback_data=f"cfg_group_{key}")] for key, (label, _) in CONFIG_SECTIONS.items()],
             [InlineKeyboardButton("Tổng quan", callback_data="status_refresh")],
         ])
-    fields = [
-        ("enabled", "Mở lệnh mới"), ("require_sl", "Bắt buộc SL"),
-        ("enable_dual_entry", "Hai đầu vùng giá"), ("max_slippage_entry", "Dung sai giá"),
-        ("lot_min_entry", "Lot nhánh 1"), ("lot_max_entry", "Lot nhánh 2"),
-        ("max_open_positions", "Tối đa lệnh"), ("default_lot", "Lot mặc định"),
-        ("default_partial_close_percent", "Chốt một phần (%)"), ("auto_breakeven_on_partial", "Tự dời SL"),
-        ("breakeven_offset_price", "Bù giá hòa vốn"),
-        ("breakeven_only_improve", "Không nới SL tự động"), ("tp1_enabled", "Xử lý TP1"),
-        ("tp1_min_volume_action", "TP1 thiếu lot"), ("auto_cancel_pending_on_full_close", "Tự hủy nhánh chờ"),
-        ("generic_partial_uses_default", "Tỷ lệ chốt chung"),
-        ("allow_multiple_partial_closes", "Chốt nhiều lần"), ("require_explicit_close", "Đóng lệnh rõ ràng"),
-        ("max_daily_loss_percent", "Lỗ ngày tối đa (%)"), ("signal_expire_seconds", "Hạn tín hiệu (giây)"),
-    ]
     buttons = []
-    for key, label in fields:
+    for key, label in CONFIG_FIELDS.items():
         if key not in CONFIG_SECTIONS[group][1]:
             continue
         value = getattr(config, key)
@@ -106,6 +87,8 @@ def build_risk_config_keyboard(config: RiskConfig, group: str | None = None) -> 
             value = "Bật" if value else "Tắt"
         elif key == "tp1_min_volume_action":
             value = "Dời SL" if value == "breakeven" else "Bỏ qua"
+        elif isinstance(value, list):
+            value = ", ".join(value)
         buttons.append(InlineKeyboardButton(f"{label}: {value}", callback_data=f"cfg_{key}"))
     rows = [[button] for button in buttons]
     rows.append([InlineKeyboardButton("← Nhóm cài đặt", callback_data="view_config_risk")])
