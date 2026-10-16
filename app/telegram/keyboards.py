@@ -95,22 +95,31 @@ def build_risk_config_keyboard(config: RiskConfig, group: str | None = None) -> 
     return InlineKeyboardMarkup(rows)
 
 
-def build_history_keyboard(days: int = 7) -> InlineKeyboardMarkup:
+def build_history_keyboard(days: int = 7, page: int = 0, pages: int = 1) -> InlineKeyboardMarkup:
     """Build interactive time filter buttons for trade history."""
     buttons = [
         [
-            InlineKeyboardButton("📅 Hôm Nay", callback_data="history_1"),
+            InlineKeyboardButton("24 giờ", callback_data="history_1"),
             InlineKeyboardButton("📅 7 Ngày", callback_data="history_7"),
             InlineKeyboardButton("📅 30 Ngày", callback_data="history_30"),
         ],
         [
             InlineKeyboardButton("📈 Thống Kê Win/Loss", callback_data="view_stats"),
-            InlineKeyboardButton("🔄 Nạp lại", callback_data=f"history_{days}"),
+            InlineKeyboardButton("🔄 Cập nhật", callback_data=f"history_{days}_{page}"),
         ],
         [
             InlineKeyboardButton("🔙 Tổng quan", callback_data="status_refresh"),
         ],
     ]
+    nav = []
+    if page:
+        nav.append(InlineKeyboardButton("← Mới hơn", callback_data=f"history_{days}_{page - 1}"))
+    if page + 1 < pages:
+        nav.append(InlineKeyboardButton("Cũ hơn →", callback_data=f"history_{days}_{page + 1}"))
+    if nav:
+        buttons.insert(0, nav)
+    if page:
+        buttons.insert(1, [InlineKeyboardButton("⏮ Lệnh mới nhất", callback_data=f"history_{days}_0")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -118,7 +127,7 @@ def build_stats_keyboard(days: int = 7) -> InlineKeyboardMarkup:
     """Build interactive time filter buttons for Win/Loss performance statistics."""
     buttons = [
         [
-            InlineKeyboardButton("📅 Hôm Nay", callback_data="stats_1"),
+            InlineKeyboardButton("24 giờ", callback_data="stats_1"),
             InlineKeyboardButton("📅 7 Ngày", callback_data="stats_7"),
             InlineKeyboardButton("📅 30 Ngày", callback_data="stats_30"),
         ],

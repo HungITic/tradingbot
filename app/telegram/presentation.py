@@ -48,30 +48,35 @@ def trade_title(item):
 
 def position_card(pos, currency="", ordinal=None):
     prefix = f"{ordinal}. " if ordinal is not None else ""
-    pnl = money(pos.profit, currency, signed=True)
-    return "\n\n".join([
-        heading(prefix + trade_title(pos)) + "\n" + field("Ticket", f"#{pos.ticket}", code=True),
-        f"{'🟢' if pos.profit >= 0 else '🔴'} <b>Lãi/lỗ đang chạy: {escape(pnl)}</b>\n"
-        + field("Khối lượng", f"{number(pos.volume)} lot"),
-        section("GIÁ GIAO DỊCH", field("Entry", price(pos.open_price), code=True),
-                field("Hiện tại", price(pos.current_price), code=True)),
-        section("BẢO VỆ LỆNH", field("SL · Dừng lỗ", price(pos.sl), code=True),
-                field("TP · Chốt lời", price(pos.tp), code=True)),
+    return "\n".join([
+        heading(prefix + trade_title(pos)) + f" · <code>#{pos.ticket}</code>",
+        f"PnL đang chạy <b>{escape(money(pos.profit, currency, signed=True))}</b> · {number(pos.volume)} lot",
+        f"Entry {price(pos.open_price)} → Hiện tại {price(pos.current_price)}",
+        f"SL {price(pos.sl)} · TP {price(pos.tp)}",
     ])
 
 
 def pending_card(order):
-    return "\n\n".join([
-        heading("⏳ " + trade_title(order).split(" ", 1)[1]) + "\n" + field("Ticket", f"#{order.ticket}", code=True),
-        field("Khối lượng chờ", f"{number(order.volume)} lot"),
-        section("MỨC GIÁ", field("Giá đặt", price(order.price), code=True),
-                field("SL · Dừng lỗ", price(order.sl), code=True),
-                field("TP · Chốt lời", price(order.tp), code=True)),
+    return "\n".join([
+        heading("⏳ " + trade_title(order).split(" ", 1)[1]) + f" · <code>#{order.ticket}</code>",
+        f"{number(order.volume)} lot · Giá đặt {price(order.price)}",
+        f"SL {price(order.sl)} · TP {price(order.tp)}",
     ])
 
 
 def join_cards(cards):
-    return f"\n\n{DIVIDER}\n\n".join(cards)
+    return "\n\n".join(card for card in cards if card)
+
+
+def history_card(pos):
+    from app.core.timezone import format_vietnam_time
+    status = "Đã đóng hết" if pos.is_fully_closed else "Còn giữ vị thế"
+    return "\n".join([
+        heading(f"{pos.symbol} · {pos.position_type}") + f" · <code>#{pos.ticket}</code>",
+        f"PnL đã chốt <b>{escape(money(pos.net_pnl, pos.currency, signed=True))}</b> · Đóng {number(pos.volume)}/{number(pos.total_volume)} lot",
+        f"Entry {price(pos.open_price)} → Đóng TB {price(pos.close_price)}",
+        f"{format_vietnam_time(pos.close_time, '%H:%M %d/%m/%Y')} · {status} · {pos.deals_count} lần chốt",
+    ])
 
 
 def config_value(value):
@@ -90,15 +95,12 @@ def config_value(value):
 def execution_card(title, request, result, timestamp=None):
     filled = request.order_type in {"BUY", "SELL"}
     blocks = [heading(title),
-        section(f"{request.symbol} · {request.order_type}",
-            field("Ticket", f"#{result.ticket}", code=True),
-            field("Khối lượng", f"{number(result.volume or request.volume)} lot")),
-        section("MỨC GIÁ", field("Giá khớp" if filled else "Giá đặt", price(result.price or request.price), code=True),
-            field("SL · Dừng lỗ", price(request.sl), code=True),
-            field("TP · Chốt lời", price(request.tp), code=True))]
+        heading(f"{request.symbol} · {request.order_type}") + f" · <code>#{result.ticket}</code>\n"
+        + f"{number(result.volume or request.volume)} lot · "
+        + field("Giá khớp" if filled else "Giá đặt", price(result.price or request.price)) + "\n"
+        + f"SL {price(request.sl)} · TP {price(request.tp)}"]
     if request.tp1 is not None and request.tp2 is not None:
-        blocks.append(section("CHỐT THEO MỐC", field("TP1", price(request.tp1), code=True),
-                              field("TP2", price(request.tp2), code=True)))
+        blocks.append(f"TP1 {price(request.tp1)} · TP2 {price(request.tp2)}")
     if timestamp:
         blocks.append(f"<i>{escape(timestamp)}</i>")
     return join_cards(blocks)

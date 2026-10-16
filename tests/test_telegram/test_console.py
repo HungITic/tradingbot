@@ -242,3 +242,82 @@ async def test_invalid_min_lot_keeps_existing_config_and_allows_retry(bot):
     # Returning to the menu cancels the old input so unrelated text cannot change it.
     await bot.handle_console_callback(update, context, 'cfg_group_entry')
     assert 'config_field' not in context.user_data
+
+
+def closed_position(ticket, deals=0):
+    from app.broker.base import ClosedPositionInfo, PartialCloseDealInfo
+    from datetime import timedelta
+    timestamp = datetime(2026, 10, 16, 10, tzinfo=timezone.utc)
+    return ClosedPositionInfo(
+        ticket=ticket, symbol='XAUUSD', position_type='BUY', volume=D('.02'),
+        open_price=D('2650'), close_price=D('2660'), profit=D('20'), swap=D('-1'),
+        commission=D('-1'), net_pnl=D('18'), open_time=timestamp,
+        close_time=timestamp + timedelta(minutes=ticket), deals_count=max(1, deals),
+        partial_deals=[PartialCloseDealInfo(i, D('.01'), D('2660'), D('10'), timestamp + timedelta(minutes=i))
+                       for i in range(deals)])
+
+
+@pytest.mark.asyncio
+async def test_history_pages_keep_latest_near_controls_and_reach_all_records(bot):
+    bot.service.get_closed_positions = AsyncMock(return_value=[closed_position(i) for i in range(20, 0, -1)])
+    first, keyboard = await bot._format_history_message(30)
+    assert 'Trang 1/7' in first
+    assert first.index('#20') < first.index('#19') < first.index('#18')
+    assert '#17' not in first and len(first.splitlines()) <= 18
+    callbacks = [b.callback_data for row in keyboard.inline_keyboard for b in row]
+    assert 'history_30_1' in callbacks and 'history_30_-1' not in callbacks
+    assert 'history_detail_30_0_20_0' in callbacks
+    bot.service.get_closed_positions.assert_awaited_with(days=30, limit=None)
+    last, keyboard = await bot._format_history_message(30, 999)
+    assert 'Trang 7/7' in last and '#2' in last and '#1' in last
+    callbacks = [b.callback_data for row in keyboard.inline_keyboard for b in row]
+    assert 'history_30_0' in callbacks and 'history_30_5' in callbacks
+    assert 'history_30_7' not in callbacks
+
+
+@pytest.mark.asyncio
+async def test_history_empty_and_stale_detail_offer_way_back(bot):
+    bot.service.get_closed_positions = AsyncMock(return_value=[])
+    text, keyboard = await bot._format_history_message(7, -2)
+    assert 'Trang 1/1' in text and 'Chưa có lệnh chốt' in text
+    assert not any(b.callback_data.startswith('history_detail_') for row in keyboard.inline_keyboard for b in row)
+    text, keyboard = await bot._format_history_detail(7, 2, 404)
+    assert 'không còn' in text and keyboard.inline_keyboard[0][0].callback_data == 'history_7_2'
+
+
+@pytest.mark.asyncio
+async def test_history_detail_bounds_partial_deals_and_preserves_list_page(bot):
+    bot.service.get_closed_positions = AsyncMock(return_value=[closed_position(42, deals=17)])
+    text, keyboard = await bot._format_history_detail(30, 3, 42)
+    assert 'Các lần chốt · 1/4' in text
+    assert '#16' in text and '#12' in text and '#11' not in text
+    assert len(text) < 4096
+    callbacks = [b.callback_data for row in keyboard.inline_keyboard for b in row]
+    assert 'history_detail_30_3_42_1' in callbacks and 'history_30_3' in callbacks
+    last, keyboard = await bot._format_history_detail(30, 3, 42, 999)
+    assert 'Các lần chốt · 4/4' in last and '#0' in last
+    assert 'history_detail_30_3_42_4' not in [b.callback_data for row in keyboard.inline_keyboard for b in row]
+
+
+@pytest.mark.asyncio
+async def test_history_callbacks_support_new_pages_and_old_filter_buttons(bot):
+    bot.service.get_closed_positions = AsyncMock(return_value=[closed_position(42)])
+    update, context = callback()
+    update.callback_query.answer = AsyncMock()
+    for data, expected in [('history_30_2', 'Lịch sử lệnh'),
+                           ('history_7', 'Lịch sử lệnh'),
+                           ('history_detail_30_2_42_0', 'Chi tiết lệnh')]:
+        update.callback_query.data = data
+        await bot.handle_callback.__wrapped__(bot, update, context)
+        assert expected in update.callback_query.edit_message_text.call_args.args[0]
+
+
+def test_compact_cards_escape_broker_text_and_keep_precise_prices():
+    from app.telegram.presentation import position_card, join_cards
+    pos = position(1)
+    pos.symbol = 'XAU<&>'
+    pos.open_price = D('1.12345')
+    card = position_card(pos, 'USD')
+    assert 'XAU&lt;&amp;&gt;' in card and '1.12345' in card
+    assert len(card.splitlines()) == 4 and '\n\n' not in card
+    assert join_cards(['A', '', 'B']) == 'A\n\nB'

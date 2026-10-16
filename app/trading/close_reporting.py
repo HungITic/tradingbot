@@ -105,12 +105,12 @@ class CloseReportingMixin:
             section("KẾT QUẢ LẦN CHỐT NÀY",
                 f"{'🟢' if realized >= 0 else '🔴'} <b>PnL lần chốt: {escape(money(realized, currency, signed=True))}</b>",
                 field("Lãi/lỗ giá", money(deal.profit, currency, signed=True)),
-                field("Swap", money(deal.swap, currency, signed=True)),
-                field("Commission", money(deal.commission, currency, signed=True))),
+                field("Swap", money(deal.swap, currency, signed=True)) + " · "
+                + field("Commission", money(deal.commission, currency, signed=True))),
             section("KHỐI LƯỢNG VÀ GIÁ", field("Khối lượng deal (gồm mở lại)" if deal.entry == "INOUT" else "Đã đóng", f"{number(deal.volume)} lot"),
                 field("Giá đóng", price(deal.price), code=True)),
             section("LÝ DO THỰC HIỆN", escape(reason)),
-            "<i>PnL của deal này gồm lãi/lỗ giá, swap và commission; chưa phân bổ phí của deal vào lệnh.</i>"]
+            "<i>PnL gồm swap và commission lần chốt; chưa phân bổ phí mở lệnh.</i>"]
         link = self._order_message_links.get(deal.position_id)
         if not link:
             signal_id = self._ticket_to_signal_db_id.get(deal.position_id)

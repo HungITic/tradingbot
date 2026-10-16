@@ -14,7 +14,7 @@ from decimal import Decimal
 from typing import Any
 
 import structlog
-from telegram import InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
 from telegram.ext import (
@@ -26,7 +26,7 @@ from telegram.ext import (
     filters,
 )
 
-from app.telegram.presentation import heading, section, field, money, join_cards
+from app.telegram.presentation import heading, section, field, money, number, price, history_card, join_cards
 from app.config.settings import settings
 from app.telegram.keyboards import (
     build_history_keyboard,
@@ -64,7 +64,7 @@ def admin_only(func):
             if target:
                 await target.reply_text(
                     f"⛔ <b>Từ Chối Truy Cập</b>\n"
-                    f"━━━━━━━━━━━━━━━━\n"
+                    f""
                     f"User ID: <code>{user_id}</code>\n"
                     f"Chat ID: <code>{chat_id}</code>\n"
                     f"Admin ID: <code>{admin_id}</code>",
@@ -217,7 +217,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         msg = (
             "📖 <b>Danh Mục Lệnh</b>\n"
-            "━━━━━━━━━━━━━━━━\n\n"
+            "\n"
             "<b>📊 Giao dịch &amp; Vị thế:</b>\n"
             "/status — Tổng quan hệ thống\n"
             "/inbox — Hộp thư tín hiệu và lý do xử lý\n"
@@ -252,7 +252,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
             "/resume — Tiếp tục giao dịch\n"
             "/health — Kiểm tra kết nối\n"
             "/kill — Dừng khẩn cấp\n"
-            "━━━━━━━━━━━━━━━━"
+            ""
         )
         if update.effective_message:
             await update.effective_message.reply_text(msg, parse_mode=ParseMode.HTML)
@@ -288,101 +288,49 @@ class PersonalTelegramBot(TelegramConsoleMixin):
         if update.effective_message:
             await update.effective_message.reply_text(msg, parse_mode=ParseMode.HTML)
 
-    async def _format_history_message(self, days: int = 7) -> tuple[str, InlineKeyboardMarkup]:
-        positions = await self.service.get_closed_positions(days=days, limit=15)
+    async def _format_history_message(self, days: int = 7, page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
+        positions = await self.service.get_closed_positions(days=days, limit=None)
+        pages = max(1, (len(positions) + 2) // 3)
+        page = min(max(page, 0), pages - 1)
+        visible = positions[page * 3:page * 3 + 3]
+        cards = [heading("📜 Lịch sử lệnh", f"{days} ngày · Trang {page + 1}/{pages} · {len(positions)} vị thế · Mới nhất trước · Giờ VN")]
+        cards.extend(history_card(pos) for pos in visible)
         if not positions:
-            msg = (
-                f"📜 <b>Lịch Sử Giao Dịch</b>\n"
-                f"━━━━━━━━━━━━━━━━\n"
-                f"⏱ Kỳ xem: {days} ngày\n\n"
-                f"Không có giao dịch nào trong khoảng thời gian này."
-            )
-        else:
-            cards = []
-            for pos in positions:
-                badge_icon = "🔴" if pos.position_type == "SELL" else "🟢"
-                pos_type_title = "Sell" if pos.position_type == "SELL" else "Buy"
+            cards.append("Chưa có lệnh chốt trong kỳ này.")
+        keyboard = build_history_keyboard(days, page, pages)
+        details = [[InlineKeyboardButton(f"#{pos.ticket} · Chi tiết", callback_data=f"history_detail_{days}_{page}_{pos.ticket}_0")
+                    for pos in visible]] if visible else []
+        return join_cards(cards), InlineKeyboardMarkup(details + list(keyboard.inline_keyboard))
 
-                pnl_icon = "🟢" if pos.net_pnl > 0 else ("🔴" if pos.net_pnl < 0 else "⚪")
-                if pos.net_pnl % Decimal("1") == Decimal("0"):
-                    pnl_num_str = f"{pos.net_pnl:+,.0f}"
-                else:
-                    pnl_num_str = f"{pos.net_pnl:+,.2f}"
-                pnl_str = f"{pnl_num_str} {pos.currency}"
-
-                def _fmt_vol(v: Decimal) -> str:
-                    s = f"{v:.2f}".rstrip("0")
-                    if s.endswith("."):
-                        s = s[:-1]
-                    return s if s else "0"
-
-                vol_str = f"{_fmt_vol(pos.volume)}/{_fmt_vol(pos.total_volume)} Lots"
-                if not pos.is_fully_closed:
-                    partial_note = " <i>(Đang giữ vị thế)</i>"
-                elif pos.deals_count > 1:
-                    partial_note = f" <i>({pos.deals_count} lần chốt)</i>"
-                else:
-                    partial_note = ""
-
-                def _format_price_display(val: Decimal | None) -> str:
-                    if val is None:
-                        return "N/A"
-                    min_decimals = 4 if val < Decimal("50") else 2
-                    s = f"{val:,.5f}".rstrip("0")
-                    if s.endswith("."):
-                        s += "0" * min_decimals
-                    else:
-                        dec_len = len(s.split(".")[1])
-                        if dec_len < min_decimals:
-                            s += "0" * (min_decimals - dec_len)
-                    return s
-
-                open_price_str = _format_price_display(pos.open_price)
-                close_price_str = _format_price_display(pos.close_price)
-                close_time_str = format_vietnam_time(pos.close_time, "%d/%m/%Y %H:%M:%S")
-
-                card_lines = [
-                    f"{badge_icon} <b>{pos_type_title} {pos.symbol}</b>  (<code>#{pos.ticket}</code>)",
-                    f"<b>Kết thúc PnL:</b> {pnl_icon} <b>{pnl_str}</b>",
-                    f"<b>Đã đóng/Tổng số lượng:</b> <code>{vol_str}</code>{partial_note}",
-                    f"<b>Giá mở:</b> <code>{open_price_str}</code>",
-                    f"<b>Trung bình Giá đóng:</b> <code>{close_price_str}</code>",
-                    f"<b>Thời gian đóng:</b> <code>{close_time_str}</code>",
-                ]
-
-                # Option 2: Hiển thị chi tiết từng lần đóng nếu có từ 2 lần chốt trở lên
-                if pos.deals_count > 1 and pos.partial_deals:
-                    card_lines.append("<b>Chi tiết các lần đóng:</b>")
-                    for idx, pd in enumerate(pos.partial_deals):
-                        prefix = "  └" if idx == len(pos.partial_deals) - 1 else "  ├"
-                        if pd.profit % Decimal("1") == Decimal("0"):
-                            pd_pnl_str = f"{pd.profit:+,.0f} {pos.currency}"
-                        else:
-                            pd_pnl_str = f"{pd.profit:+,.2f} {pos.currency}"
-                        pd_vol_str = _fmt_vol(pd.volume)
-                        pd_price_str = _format_price_display(pd.price)
-                        card_lines.append(
-                            f"{prefix} <code>{pd_vol_str} lot @ {pd_price_str} ({pd_pnl_str})</code>"
-                        )
-
-                card = "\n".join(card_lines)
-                cards.append(card)
-
-            msg = (
-                f"📜 <b>Lịch Sử Giao Dịch ({days} ngày)</b>\n"
-                f"━━━━━━━━━━━━━━━━\n\n"
-                + "\n\n────────────────\n\n".join(cards)
-                + f"\n\n━━━━━━━━━━━━━━━━\n📊 Hiển thị {len(positions)} vị thế gần nhất."
-            )
-
-        keyboard = build_history_keyboard(days)
-        return msg, keyboard
+    async def _format_history_detail(self, days: int, page: int, ticket: int, deal_page: int = 0):
+        positions = await self.service.get_closed_positions(days=days, limit=None)
+        pos = next((pos for pos in positions if pos.ticket == ticket), None)
+        back = [InlineKeyboardButton("← Danh sách lệnh", callback_data=f"history_{days}_{page}")]
+        if pos is None:
+            return "Lệnh không còn trong kỳ đang xem. Hãy cập nhật danh sách.", InlineKeyboardMarkup([back])
+        from app.core.timezone import to_vietnam_datetime
+        deals = sorted(pos.partial_deals, key=lambda d: (to_vietnam_datetime(d.time), d.ticket), reverse=True)
+        pages = max(1, (len(deals) + 4) // 5)
+        deal_page = min(max(deal_page, 0), pages - 1)
+        blocks = [heading("📜 Chi tiết lệnh"), history_card(pos),
+            section("Lãi/lỗ đã ghi nhận", field("Lãi/lỗ giá", money(pos.profit, pos.currency, signed=True)),
+                field("Swap", money(pos.swap, pos.currency, signed=True)),
+                field("Commission", money(pos.commission, pos.currency, signed=True))),
+            section(f"Các lần chốt · {deal_page + 1}/{pages}", *[
+                f"{format_vietnam_time(d.time)} · {number(d.volume)} lot @ {price(d.price)}\n"
+                f"<code>#{d.ticket}</code> · {escape(money(d.profit, pos.currency, signed=True))}"
+                for d in deals[deal_page * 5:deal_page * 5 + 5]]) if deals else "Chưa có chi tiết từng lần chốt."]
+        nav = []
+        if deal_page:
+            nav.append(InlineKeyboardButton("← Mới hơn", callback_data=f"history_detail_{days}_{page}_{ticket}_{deal_page - 1}"))
+        if deal_page + 1 < pages:
+            nav.append(InlineKeyboardButton("Cũ hơn →", callback_data=f"history_detail_{days}_{page}_{ticket}_{deal_page + 1}"))
+        return join_cards(blocks), InlineKeyboardMarkup(([nav] if nav else []) + [back])
 
     async def _format_stats_message(self, days: int = 7) -> tuple[str, InlineKeyboardMarkup]:
         stats = await self.service.get_performance_summary(days=days)
         net_pnl = stats["net_pnl"]
         pnl_icon = "🟢" if net_pnl > Decimal("0") else ("🔴" if net_pnl < Decimal("0") else "⚪")
-        pnl_sign = "+" if net_pnl > Decimal("0") else ""
 
         pf_val = stats["profit_factor"]
         pf_str = f"{pf_val:.2f}" if pf_val < 900 else "∞ (Chưa có lệnh thua)"
@@ -391,11 +339,10 @@ class PersonalTelegramBot(TelegramConsoleMixin):
         msg = join_cards([
             heading("📈 Báo cáo hiệu suất", f"Kỳ thống kê: {days} ngày"),
             section("KẾT QUẢ", f"{pnl_icon} <b>Lãi ròng: {escape(money(net_pnl, currency, signed=True))}</b>"),
-            section("GIAO DỊCH", field("Tổng số", stats['total_trades']),
-                field("Thắng", stats['win_trades']), field("Thua", stats['loss_trades']),
-                field("Hòa vốn", stats['breakeven_trades']), field("Tỷ lệ thắng", f"{stats['win_rate']}%")),
+            section("Giao dịch", f"{stats['total_trades']} lệnh · Thắng {stats['win_trades']} · Thua {stats['loss_trades']} · Hòa {stats['breakeven_trades']}",
+                field("Tỷ lệ thắng", f"{stats['win_rate']}%") + " · " + field("Profit Factor", pf_str)),
             section("LÃI VÀ LỖ", field("Tổng lãi", money(stats['total_profit'], currency, signed=True)),
-                field("Tổng lỗ", money(stats['total_loss'], currency, signed=True)), field("Profit Factor", pf_str)),
+                field("Tổng lỗ", money(stats['total_loss'], currency, signed=True))),
             await self.monthly_volume_block(),
             section("LỆNH NỔI BẬT", field("Lãi lớn nhất", money(stats['best_trade'], currency, signed=True)),
                 field("Lỗ lớn nhất", money(stats['worst_trade'], currency, signed=True)))])
@@ -443,7 +390,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
             if res.success:
                 await update.message.reply_text(
                     f"✅ <b>Đã Đóng Vị Thế</b>\n"
-                    f"━━━━━━━━━━━━━━━━\n"
+                    f""
                     f"• Ticket: <code>{ticket}</code>\n"
                     f"• Kết quả: Thành công",
                     parse_mode=ParseMode.HTML,
@@ -451,7 +398,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
             else:
                 await update.message.reply_text(
                     f"❌ <b>Đóng Vị Thế Thất Bại</b>\n"
-                    f"━━━━━━━━━━━━━━━━\n"
+                    f""
                     f"• Ticket: <code>{ticket}</code>\n"
                     f"• Lý do: {res.comment}",
                     parse_mode=ParseMode.HTML,
@@ -469,7 +416,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
         successes = sum(1 for r in results if r.success)
         await update.message.reply_text(
             f"🚨 <b>Đã Đóng Toàn Bộ Vị Thế</b>\n"
-            f"━━━━━━━━━━━━━━━━\n"
+            f""
             f"• Đã đóng thành công: <b>{successes}/{len(results)}</b> vị thế",
             parse_mode=ParseMode.HTML,
         )
@@ -480,7 +427,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
         if not args:
             await update.message.reply_text(
                 "⚠️ <b>Cú pháp lệnh chốt bớt (Partial Close):</b>\n"
-                "━━━━━━━━━━━━━━━━\n"
+                ""
                 "• <b>Chốt tất cả vị thế:</b>\n"
                 "  <code>/partial &lt;%&gt;</code>\n"
                 "  <i>Ví dụ:</i> <code>/partial 50</code> (chốt 50% tất cả vị thế đang mở)\n\n"
@@ -490,7 +437,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
                 "• <b>Chốt 1 lệnh cụ thể:</b>\n"
                 "  <code>/partial &lt;ticket&gt; &lt;%&gt;</code>\n"
                 "  <i>Ví dụ:</i> <code>/partial 342003626 50</code>\n"
-                "━━━━━━━━━━━━━━━━\n"
+                ""
                 "<i>Lệnh tương đương:</i> <code>/partialall &lt;%&gt; [symbol]</code> hoặc <code>/chotbot &lt;%&gt;</code>",
                 parse_mode=ParseMode.HTML,
             )
@@ -514,7 +461,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
                 await update.message.reply_text("📂 <b>Không có vị thế nào đang mở để chốt bớt.</b>", parse_mode=ParseMode.HTML)
                 return
 
-            lines = [f"✂️ <b>Chốt Bớt {percent}% Cho Tất Cả Vị Thế</b>\n━━━━━━━━━━━━━━━━"]
+            lines = [f"✂️ <b>Chốt Bớt {percent}% Cho Tất Cả Vị Thế</b>"]
             for pos, res, vol in results:
                 icon = "✅" if res.success else "❌"
                 rem = max(Decimal("0.00"), pos.volume - vol) if res.success else pos.volume
@@ -540,7 +487,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
                     )
                     return
 
-                lines = [f"✂️ <b>Chốt Bớt {percent_first}% Vị Thế ({symbol_filter.upper()})</b>\n━━━━━━━━━━━━━━━━"]
+                lines = [f"✂️ <b>Chốt Bớt {percent_first}% Vị Thế ({symbol_filter.upper()})</b>"]
                 for pos, res, vol in results:
                     icon = "✅" if res.success else "❌"
                     rem = max(Decimal("0.00"), pos.volume - vol) if res.success else pos.volume
@@ -565,7 +512,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
                 rem_vol = target.volume - vol
                 await update.message.reply_text(
                     f"✅ <b>Chốt Lời Một Phần Thành Công</b>\n"
-                    f"━━━━━━━━━━━━━━━━\n"
+                    f""
                     f"• Ticket: <code>{ticket}</code> ({target.symbol})\n"
                     f"• Đã đóng: <b>{vol} lot</b> ({percent}%)\n"
                     f"• Còn lại: <b>{rem_vol} lot</b>\n"
@@ -575,7 +522,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
             else:
                 await update.message.reply_text(
                     f"❌ <b>Chốt Lời Thất Bại</b>\n"
-                    f"━━━━━━━━━━━━━━━━\n"
+                    f""
                     f"• Ticket: <code>{ticket}</code>\n"
                     f"• Lý do: {res.comment}",
                     parse_mode=ParseMode.HTML,
@@ -609,7 +556,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
             if res.success:
                 await update.message.reply_text(
                     f"✅ <b>Đã Cập Nhật Stop Loss</b>\n"
-                    f"━━━━━━━━━━━━━━━━\n"
+                    f""
                     f"• Ticket: <code>{ticket}</code>\n"
                     f"• SL mới: <code>{price}</code>",
                     parse_mode=ParseMode.HTML,
@@ -617,7 +564,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
             else:
                 await update.message.reply_text(
                     f"❌ <b>Cập Nhật SL Thất Bại</b>\n"
-                    f"━━━━━━━━━━━━━━━━\n"
+                    f""
                     f"• Ticket: <code>{ticket}</code>\n"
                     f"• Lý do: {res.comment}",
                     parse_mode=ParseMode.HTML,
@@ -642,7 +589,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
             if res.success:
                 await update.message.reply_text(
                     f"✅ <b>Đã Cập Nhật Take Profit</b>\n"
-                    f"━━━━━━━━━━━━━━━━\n"
+                    f""
                     f"• Ticket: <code>{ticket}</code>\n"
                     f"• TP mới: <code>{price}</code>",
                     parse_mode=ParseMode.HTML,
@@ -650,7 +597,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
             else:
                 await update.message.reply_text(
                     f"❌ <b>Cập Nhật TP Thất Bại</b>\n"
-                    f"━━━━━━━━━━━━━━━━\n"
+                    f""
                     f"• Ticket: <code>{ticket}</code>\n"
                     f"• Lý do: {res.comment}",
                     parse_mode=ParseMode.HTML,
@@ -683,7 +630,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
         now_vn = now_vietnam().strftime("%H:%M:%S %d/%m/%Y")
         await update.message.reply_text(
             f"⏸️ <b>Đã Tạm Dừng Bot</b>\n"
-            f"━━━━━━━━━━━━━━━━\n"
+            f""
             f"• Trạng thái: <b>TẠM DỪNG (Paused)</b>\n"
             f"• Bot sẽ không vào lệnh mới từ tín hiệu.\n"
             f"⏱ {now_vn}",
@@ -696,7 +643,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
         now_vn = now_vietnam().strftime("%H:%M:%S %d/%m/%Y")
         await update.message.reply_text(
             f"▶️ <b>Đã Kích Hoạt Lại Bot</b>\n"
-            f"━━━━━━━━━━━━━━━━\n"
+            f""
             f"• Trạng thái: <b>HOẠT ĐỘNG (Active)</b>\n"
             f"• Bot sẵn sàng nhận và xử lý tín hiệu mới.\n"
             f"⏱ {now_vn}",
@@ -868,7 +815,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
             rules = self.service.get_management_rules()
             lines = [
                 "📖 <b>Danh Sách Từ Khóa Quản Lý Lệnh</b>\n"
-                "━━━━━━━━━━━━━━━━\n"
+                ""
                 "<i>Bot tự động nhận diện các từ khóa này trong tin nhắn Telegram:</i>\n"
             ]
 
@@ -883,7 +830,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
                 lines.append(f"• <code>{r.keyword}</code> ➔ <b>{action_name}</b> {param_str}")
 
             lines.extend([
-                "\n━━━━━━━━━━━━━━━━\n"
+                "\n"
                 "💡 <b>Lệnh thao tác:</b>\n"
                 "• Thêm/sửa: <code>/rule add &lt;từ khóa&gt; &lt;ACTION&gt; [params]</code>\n"
                 "  <i>VD:</i> <code>/rule add \"cắt bớt\" PARTIAL_CLOSE 50</code>\n"
@@ -913,7 +860,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
         if len(tokens) < 2:
             await update.message.reply_text(
                 "⚠️ <b>Cú pháp quản lý từ khóa:</b>\n"
-                "━━━━━━━━━━━━━━━━\n"
+                ""
                 "• Thêm: <code>/rule add &lt;từ khóa&gt; &lt;ACTION&gt; [params]</code>\n"
                 "• Xóa: <code>/rule del &lt;từ khóa&gt;</code>\n\n"
                 "<i>Xem danh sách: /rules</i>",
@@ -955,7 +902,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
             if ok:
                 await update.message.reply_text(
                     f"✅ <b>Đã Lưu Từ Khóa Quản Lý Lệnh</b>\n"
-                    f"━━━━━━━━━━━━━━━━\n"
+                    f""
                     f"• Từ khóa: <code>{keyword}</code>\n"
                     f"• Hành động: <b>{action_type_str}</b>\n"
                     f"• Tham số: {percentage or target or 'Mặc định'}\n\n"
@@ -982,7 +929,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
             if ok:
                 await update.message.reply_text(
                     f"🗑 <b>Đã Xóa Từ Khóa</b>\n"
-                    f"━━━━━━━━━━━━━━━━\n"
+                    f""
                     f"• Từ khóa: <code>{keyword}</code> đã được xóa khỏi hệ thống.",
                     parse_mode=ParseMode.HTML,
                 )
@@ -1056,7 +1003,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
         if not link:
             await msg.reply_text(
                 "ℹ️ <b>Hướng Dẫn Nạp Lại Tín Hiệu (Replay)</b>\n"
-                "━━━━━━━━━━━━━━━━\n"
+                ""
                 "Gửi link tin nhắn chứa tín hiệu từ kênh Telegram:\n"
                 "• Cú pháp: <code>/replay &lt;link_tin_nhắn&gt;</code>\n"
                 "  <i>VD:</i> <code>/replay https://t.me/MegaLodonGOLDForex/1241</code>\n\n"
@@ -1078,7 +1025,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
 
         status_msg = await msg.reply_text(
             f"⏳ <b>Đang tải tin nhắn từ Telegram...</b>\n"
-            f"━━━━━━━━━━━━━━━━\n"
+            f""
             f"• Link: <code>{escape(link)}</code>",
             parse_mode=ParseMode.HTML,
         )
@@ -1180,12 +1127,24 @@ class PersonalTelegramBot(TelegramConsoleMixin):
                     )
             except (IndexError, ValueError):
                 pass
+        elif data.startswith("history_detail_"):
+            try:
+                _, _, days, page, ticket, deal_page = data.split("_")
+                msg, keyboard = await self._format_history_detail(max(1, int(days)), int(page), int(ticket), int(deal_page))
+            except (ValueError, IndexError):
+                return
+            await query.edit_message_text(msg, parse_mode=ParseMode.HTML, reply_markup=keyboard)
         elif data.startswith("history_"):
             try:
                 days_filter = int(data.split("_")[1])
             except (IndexError, ValueError):
                 days_filter = 7
-            msg, keyboard = await self._format_history_message(days_filter)
+            parts = data.split("_")
+            try:
+                page = int(parts[2]) if len(parts) > 2 else 0
+            except ValueError:
+                page = 0
+            msg, keyboard = await self._format_history_message(max(1, days_filter), page)
             await query.edit_message_text(msg, parse_mode=ParseMode.HTML, reply_markup=keyboard)
         elif data == "view_stats":
             msg, keyboard = await self._format_stats_message(7)

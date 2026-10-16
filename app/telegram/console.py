@@ -8,7 +8,7 @@ from html import escape
 from telegram import InlineKeyboardButton as Button, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.constants import ParseMode
 
-from app.telegram.presentation import heading, section, field, number, money, position_card, pending_card, join_cards, config_value, DIVIDER
+from app.telegram.presentation import heading, section, field, number, money, position_card, pending_card, join_cards, config_value
 from app.core.timezone import format_vietnam_time, now_vietnam
 from app.telegram.keyboards import build_positions_keyboard, build_risk_config_keyboard, build_status_keyboard
 from app.telegram.configuration import CONFIG_FIELDS, CONFIG_HELP, CONFIG_GROUP_HELP
@@ -67,16 +67,14 @@ class TelegramConsoleMixin:
 
     async def monthly_volume_block(self):
         summary = await self.service.get_monthly_volume()
-        title = f"KHỐI LƯỢNG THÁNG {summary['month']}"
+        title = f"Khối lượng tháng {summary['month']} · Toàn tài khoản"
         if not summary["available"]:
             return section(title, "Chưa đọc được lịch sử MT5; hãy cập nhật lại.")
         total_lots = number(summary["total"], minimum=2)
-        lines = [field("Mở lệnh", f"{number(summary['opened'], minimum=2)} lot"),
-                 field("Đóng lệnh", f"{number(summary['closed'], minimum=2)} lot"),
+        lines = [f"Mở {number(summary['opened'], minimum=2)} · Đóng {number(summary['closed'], minimum=2)} lot",
                  f"<b>{field('Tổng hai chiều', total_lots + ' lot')}</b>"]
         if summary['unallocated']:
             lines.append(field("Chưa tách mở/đóng (đảo chiều)", f"{number(summary['unallocated'])} lot"))
-        lines.append("<i>Toàn tài khoản · Tháng dương lịch, giờ Việt Nam.</i>")
         return section(title, *lines)
 
     async def status_view(self):
@@ -86,17 +84,15 @@ class TelegramConsoleMixin:
         listening = bool(signal_listener._running and client and client.is_connected())
         currency = summary["currency"]
         pnl = money(summary["today_pnl"], currency, signed=True) if summary["daily_available"] else "Chưa đọc được dữ liệu"
-        blocks = [heading("📊 Tổng quan", "Cập nhật " + now_vietnam().strftime('%H:%M:%S · %d/%m/%Y')),
-            section("TRẠNG THÁI", field("Mở lệnh mới", "🟢 Cho phép" if summary['bot_enabled'] else "⏸ Tạm dừng"),
-                field("MT5", "✅ Kết nối" if summary['connected'] else "❌ Mất kết nối"),
-                field("Nhận tín hiệu", "✅ Kết nối" if listening else "❌ Chưa sẵn sàng")),
-            section("TÀI KHOẢN", field("Số tài khoản", summary['login'], code=True), field("Máy chủ", summary['server']),
-                field("Số dư", money(summary['balance'], currency)), field("Equity", money(summary['equity'], currency)),
+        blocks = [heading("📊 Tổng quan", now_vietnam().strftime('%H:%M:%S · %d/%m/%Y') + " · Giờ Việt Nam"),
+            section("Hoạt động", field("Mở lệnh mới", "🟢 Cho phép" if summary['bot_enabled'] else "⏸ Tạm dừng"),
+                "MT5 " + ("✅" if summary['connected'] else "❌") + " · Nhận tín hiệu " + ("✅" if listening else "❌")),
+            section("Tài khoản", field("Tài khoản", f"#{summary['login']} · {summary['server']}"),
+                field("Số dư", money(summary['balance'], currency)) + " · " + field("Equity", money(summary['equity'], currency)),
                 field("Khả dụng", money(summary['free_margin'], currency))),
-            section("HÔM NAY · GIỜ VIỆT NAM", field("Lãi/lỗ đã chốt", pnl)),
-            await self.monthly_volume_block(),
-            section("CẦN THEO DÕI", field("Vị thế đang mở", summary['open_positions_count']),
-                field("Lệnh chờ", summary['pending_orders_count']), field("Tín hiệu chờ duyệt", summary['awaiting_approval']))]
+            section("Đang theo dõi", f"{summary['open_positions_count']} vị thế · {summary['pending_orders_count']} lệnh chờ · {summary['awaiting_approval']} chờ duyệt",
+                field("PnL đã chốt hôm nay", pnl)),
+            await self.monthly_volume_block()]
         return join_cards(blocks), build_status_keyboard(summary["bot_enabled"])
 
     async def positions_view(self, page: int = 0):
@@ -110,7 +106,7 @@ class TelegramConsoleMixin:
         if not positions:
             cards.append("Không có vị thế đang mở.")
         else:
-            cards.append("<i>Nút thao tác ghi số thứ tự và ticket tương ứng với lệnh bên trên.</i>")
+            cards.append("<i>Thao tác theo số thứ tự/ticket trên nút.</i>")
         return join_cards(cards), build_positions_keyboard(positions, page, self.service.risk_config.default_partial_close_percent)
 
     async def inbox_view(self, page: int = 0, status: str = "ALL"):
@@ -123,13 +119,12 @@ class TelegramConsoleMixin:
                    [Button("Đã thực thi", callback_data="inbox_EXECUTED_0"), Button("Không hiểu", callback_data="inbox_UNKNOWN_0"),
                     Button("Lỗi", callback_data="inbox_ERROR_0")]]
         for signal, details in rows[:5]:
-            lines.append(DIVIDER)
+            lines.append("")
             lines.append(heading(f"Tín hiệu #{signal.id}") + "\n"
-                + field("Trạng thái", labels.get(signal.status, signal.status)) + "\n"
-                + field("Nhận lúc", format_vietnam_time(signal.received_at)))
-            lines.append("\n<b>NỘI DUNG</b>\n" + escape(signal.raw_message[:220]))
+                + escape(labels.get(signal.status, signal.status)) + " · " + format_vietnam_time(signal.received_at))
+            lines.append(escape(signal.raw_message[:180]))
             if details and details.get("reason"):
-                lines.append("\n<b>LÝ DO XỬ LÝ</b>\n" + escape(str(details["reason"])[:200]))
+                lines.append(field("Lý do", str(details["reason"])[:160]))
             if signal.id in self.service._pending_overrides:
                 buttons.append([Button(f"Xem quyết định #{signal.id}", callback_data=f"review_{signal.id}")])
         if not rows:
@@ -160,9 +155,8 @@ class TelegramConsoleMixin:
             if index != previous_group:
                 positions, orders = group["positions"], group["orders"]
                 pnl = sum(p.profit for p in positions)
-                cards.append(heading(group['name']) + "\n\n"
-                    + section("TỔNG KÈO", field("Vị thế đang mở", len(positions)), field("Lệnh chờ", len(orders)),
-                        field("Lãi/lỗ đang chạy", money(pnl, currency, signed=True))))
+                cards.append(heading(group['name']) + "\n"
+                    + f"{len(positions)} vị thế · {len(orders)} lệnh chờ · PnL {escape(money(pnl, currency, signed=True))}")
                 previous_group = index
             cards.append(pending_card(item) if is_pending else position_card(item, currency))
         if not entries:

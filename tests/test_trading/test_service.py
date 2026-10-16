@@ -1638,31 +1638,21 @@ async def test_personal_bot_format_history_message(mock_broker):
 
     msg, keyboard = await bot._format_history_message(days=7)
 
-    # Must contain position header, 0.1/0.1 Lots, 2 lần chốt badge
-    assert "Buy XAUUSD" in msg
-    assert "Kết thúc PnL:" in msg
-    assert "+149 USD" in msg
-    assert "Đã đóng/Tổng số lượng:" in msg
-    assert "0.1/0.1 Lots" in msg
-    assert "(2 lần chốt)" in msg
-    # Must show entry and weighted close price with comma formatting
-    assert "Giá mở:" in msg
-    assert "2,650.00" in msg
-    assert "Trung bình Giá đóng:" in msg
-    assert "2,665.00" in msg
-    # Must show close time and ticket
-    assert "Thời gian đóng:" in msg
-    assert "03/10/2026 10:00:00" in msg
+    # Summary stays compact; fees and individual exits are behind the detail button.
+    assert "XAUUSD · BUY" in msg
+    assert "+149.00 USD" in msg
+    assert "Đóng 0.1/0.1 lot" in msg
+    assert "2 lần chốt" in msg
+    assert "Entry 2,650.00 → Đóng TB 2,665.00" in msg
+    assert "10:00 03/10/2026" in msg
     assert "#888" in msg
-    # Option 2: Must show partial close breakdown tree
-    assert "Chi tiết các lần đóng:" in msg
-    assert "├ <code>0.05 lot @ 2,660.00 (+49.75 USD)</code>" in msg
-    assert "└ <code>0.05 lot @ 2,670.00 (+99.75 USD)</code>" in msg
-    assert "Hiển thị 1 vị thế gần nhất" in msg
+    assert "2,660.00" not in msg
+    assert "history_detail_7_0_888_0" in [b.callback_data for row in keyboard.inline_keyboard for b in row]
 
-
-
-
-
-
-
+    detail, keyboard = await bot._format_history_detail(7, 0, 888)
+    assert "Commission" in detail
+    assert "0.05 lot @ 2,660.00" in detail
+    assert "0.05 lot @ 2,670.00" in detail
+    assert "+49.75 USD" in detail and "+99.75 USD" in detail
+    assert detail.index("2,670.00") < detail.index("2,660.00")
+    assert keyboard.inline_keyboard[-1][0].callback_data == "history_7_0"
