@@ -4,7 +4,8 @@ Bản này thay thế các mô tả cũ về TP1, hòa vốn và chốt một ph
 
 ## Hòa vốn và SL
 
-- SL lúc mở lệnh vẫn lấy từ tín hiệu. Có hai entry **không** tự làm SL chuyển về giữa.
+- SL/TP lúc mở lệnh được bù **0.5 giá** so với mức trong tín hiệu: BUY trừ 0.5; SELL cộng 0.5. TP được kéo gần entry, SL được đẩy xa entry. Áp dụng cả TP1/TP2 và cả hai nhánh entry, gồm lệnh chờ và lệnh duyệt vượt giá. Ví dụ TP 4100 → BUY 4099.5, SELL 4100.5; SL 4200 → BUY 4199.5, SELL 4200.5.
+- Giá entry giữ nguyên; màn hình xem trước hiển thị SL/TP sau bù, nhật ký tín hiệu giữ mức gốc. Nếu TP sau bù nằm sai phía entry/giá khớp thì từ chối đặt lệnh. Quy tắc bù áp dụng khi mở lệnh mới, không tự sửa vị thế đang chạy hoặc lệnh dời SL/hòa vốn.
 - Hòa vốn luôn dùng **entry riêng của từng ticket**. Quy tắc lấy trung bình hai entry đã bị loại bỏ trong mọi luồng: tín hiệu, TP1, command và nút BE.
 - Ví dụ: lệnh 1 vào 2650, lệnh 2 vào 2640 → SL hòa vốn lần lượt là 2650 và 2640 khi offset bằng 0. Khối lượng hai lệnh không làm thay đổi điểm hòa vốn. Đây là hòa vốn theo giá, chưa tính commission/swap.
 - Offset được cộng với BUY, trừ với SELL; offset phải không âm.

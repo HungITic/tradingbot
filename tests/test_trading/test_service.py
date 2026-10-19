@@ -115,14 +115,14 @@ async def test_service_executes_new_order_signal(mock_broker):
     assert call_req_1.symbol in ("XAUUSD", "XAUUSDm")
     assert call_req_1.order_type == "SELL"
     assert call_req_1.volume == Decimal("0.01")
-    assert call_req_1.sl == Decimal("2660")
+    assert call_req_1.sl == Decimal("2660.5")
 
     call_req_2 = mock_broker.open_order.call_args_list[1][0][0]
     assert call_req_2.symbol in ("XAUUSD", "XAUUSDm")
     assert call_req_2.order_type == "SELL_LIMIT"
     assert call_req_2.volume == Decimal("0.01")
     assert call_req_2.price == Decimal("2652")
-    assert call_req_2.sl == Decimal("2660")
+    assert call_req_2.sl == Decimal("2660.5")
 
     # Notifications sent for both orders
     assert len(notifications) == 2

@@ -869,6 +869,9 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
             logger.info("signal_unknown_skipped", text=raw_text[:60])
             return
 
+        # Preserve source levels in the audit above and adjust once for execution.
+        # Override requests retain these adjusted levels without shifting them again.
+        signal = self.adjusted_signal_levels(signal)
         problem = self.signal_problem(signal, signal_time)
         if problem:
             await self.set_signal_status(signal_db_id, "REJECTED", problem)

@@ -59,6 +59,66 @@ def deal(ticket, profit, when, kind='SELL', commission='0', swap='0'):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('side,entry,sl,tp1,tp2,offset', [
+    ('BUY', '4050', '4000', '4100', '4110', '-0.5'),
+    ('BUY', '4250', '4200', '4300', '4310', '-0.5'),
+    ('SELL', '4150', '4200', '4100', '4090', '0.5'),
+])
+async def test_new_order_levels_shift_in_preview_execution_and_audit(service, database, side, entry, sl, tp1, tp2, offset):
+    # Two entries exercise both the market and pending paths.
+    second = D(entry) - 2 if side == 'BUY' else D(entry) + 2
+    raw = f'{side} XAUUSD {entry} - {second}\nSL: {sl}\nTP1: {tp1}\nTP2: {tp2}'
+    quote = D(entry)
+    service.broker.get_tick.return_value = TickInfo('XAUUSD', quote, quote, datetime.now(timezone.utc))
+    preview = await service.preview_signal(raw)
+    assert preview['can_execute']
+    for level in (sl, tp1, tp2):
+        assert f'{D(level) + D(offset):,.2f}' in preview['text']
+    service.broker.open_order.assert_not_awaited()
+
+    await service.process_raw_message(raw)
+    assert service.broker.open_order.await_count == 2
+    market, pending = [call.args[0] for call in service.broker.open_order.call_args_list]
+    assert market.price == quote and pending.price == second
+    for req in (market, pending):
+        assert req.sl == D(sl) + D(offset)
+        assert req.tp1 == D(tp1) + D(offset)
+        assert req.tp2 == req.tp == D(tp2) + D(offset)
+    from app.models.signal import ParsedSignal as DBParsedSignal
+    audit = next(call.args[0] for call in database.add.call_args_list
+                 if isinstance(call.args[0], DBParsedSignal))
+    assert audit.stop_loss == D(sl) and audit.take_profit == D(tp1) and audit.take_profit_2 == D(tp2)
+
+
+@pytest.mark.asyncio
+async def test_override_does_not_apply_level_offset_twice(service):
+    # A worse quote pauses execution for approval.
+    service.broker.get_tick.return_value = TickInfo('XAUUSD', D('2652'), D('2652'), datetime.now(timezone.utc))
+    await service.process_raw_message(SIGNAL)
+    service.broker.open_order.assert_not_awaited()
+    key = next(iter(service._pending_overrides))
+    await service.execute_override_order(key, 'min')
+    req = service.broker.open_order.call_args.args[0]
+    assert req.sl == D('2639.5') and req.tp1 == D('2669.5') and req.tp == D('2679.5')
+
+
+@pytest.mark.asyncio
+async def test_adjusted_tp_that_crosses_entry_is_rejected(service):
+    raw = 'BUY XAUUSD 2650\nSL: 2640\nTP: 2650.3'
+    assert not (await service.preview_signal(raw))['can_execute']
+    await service.process_raw_message(raw)
+    service.broker.open_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_missing_tp_stays_missing(service):
+    await service.process_raw_message('SELL XAUUSD 2650\nSL: 2660')
+    req = service.broker.open_order.call_args.args[0]
+    assert req.sl == D('2660.5')
+    assert req.tp is None and req.tp1 is None and req.tp2 is None
+
+
+@pytest.mark.asyncio
 async def test_daily_loss_uses_real_deals_and_excludes_previous_day(service):
     midnight = now_vietnam().replace(hour=0, minute=0, second=0, microsecond=0)
     # Balance 900 = opening 1000 - 105 trading PnL + 5 deposit.

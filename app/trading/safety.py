@@ -14,6 +14,18 @@ from app.signal.validator import SignalValidator
 
 
 class TradingSafetyMixin:
+    def adjusted_signal_levels(self, signal):
+        """Derive execution levels from the original signal, in absolute price units."""
+        if not signal.new_order:
+            return signal
+        order = signal.new_order
+        offset = Decimal("-0.5") if order.action == OrderAction.BUY else Decimal("0.5")
+        levels = {}
+        for name in ("stop_loss", "take_profit", "take_profit_2"):
+            value = getattr(order, name)
+            levels[name] = value + offset if value is not None else None
+        return signal.model_copy(update={"new_order": order.model_copy(update=levels)})
+
     def signal_problem(self, signal, signal_time: datetime | None = None) -> str | None:
         if signal_time is not None:
             if signal_time.tzinfo is None:
@@ -72,6 +84,7 @@ class TradingSafetyMixin:
         """Does not write the DB, send notifications, or execute broker operations."""
         signal = self.parser.parse(raw_text)
         signal.is_reentry = is_reentry
+        signal = self.adjusted_signal_levels(signal)
         problem = self.signal_problem(signal, signal_time)
         lines = [heading("🔎 Xem trước tín hiệu", "Chưa thực thi giao dịch"), ""]
         if signal_time:
@@ -90,6 +103,7 @@ class TradingSafetyMixin:
                     field("Entry thứ hai", display_price(order.entry_max or order.entry_min), code=True)), "",
                 section("BẢO VỆ LỆNH", field("SL · Dừng lỗ", display_price(order.stop_loss), code=True),
                     field("TP1", display_price(order.take_profit), code=True), field("TP2", display_price(order.take_profit_2), code=True)), "",
+                "SL/TP đã bù 0.5 giá từ tín hiệu: BUY trừ 0.5 · SELL cộng 0.5.", "",
                 section("KHỐI LƯỢNG DỰ KIẾN", field("Số lệnh tối đa", len(volumes)),
                     field("Tổng khối lượng", f"{number(sum(volumes))} lot")), ""]
             if not problem:
