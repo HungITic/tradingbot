@@ -17,7 +17,7 @@ CONFIG_FIELDS = {
     "breakeven_offset_price": "Bù giá hòa vốn (BUY cộng, SELL trừ)",
     "tp1_enabled": "Tự xử lý TP1 khi có TP2",
     "tp1_min_volume_action": "TP1 khi không đủ lot để chia",
-    "auto_cancel_pending_on_full_close": "Hủy nhánh chờ sau khi đóng hết vị thế",
+    "auto_cancel_pending_on_full_close": "Hủy Max Entry khi Min Entry có lần chốt",
     "allow_multiple_partial_closes": "Cho phép chốt một phần nhiều lần",
     "max_daily_loss_percent": "Giới hạn lỗ ngày (%)", "signal_expire_seconds": "Thời hạn tín hiệu (giây)",
 }

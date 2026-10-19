@@ -39,7 +39,8 @@ Bản này thay thế các mô tả cũ về TP1, hòa vốn và chốt một ph
 
 ## Hủy nhánh chờ và từ khóa
 
-- Tự hủy nhánh chờ chỉ khi bật chính sách và đối soát thấy vị thế liên quan đã đóng hoàn toàn. Chốt một phần không làm hủy nhánh chờ.
+- Khi bật chính sách, hủy **Max Entry còn chờ của cùng signal** ngay khi Min Entry có lần chốt thành công đầu tiên: SL, TP/TP1, chốt một phần, đóng tay hoặc đóng từ Telegram. Không cần đợi đóng hết Min Entry. Max Entry đã khớp thành vị thế thì không bị đóng bởi quy tắc này.
+- Liên kết theo mã vị thế gốc và order mở từ broker; không suy đoán từ số trong comment. Lịch sử gom các deal chốt cùng vị thế, giữ từng lần chốt trong chi tiết. Deal chưa có liên kết hoặc không đọc được vị thế hiện tại sẽ hiện trạng thái chưa xác định.
 - Tác vụ đối soát cần thêm bằng chứng deal thoát trong lịch sử 7 ngày; việc không thấy ticket trong danh sách không đủ để kết luận đã đóng.
 - Hủy lệnh thất bại không được đưa vào danh sách “đã hủy”, nên có thể thử lại.
 - Lệnh chủ động “đóng kèo” qua reply vẫn hủy lệnh chờ thuộc kèo theo yêu cầu rõ ràng của người dùng. Tắt tự hủy nhánh không vô hiệu hóa yêu cầu chủ động này hoặc `/kill`.
@@ -62,7 +63,7 @@ Mở `/config` và chọn mục cần đổi. Các thay đổi đều có xem tr
 | `generic_partial_uses_default` | `true` | Câu chốt bớt chung dùng tỷ lệ cấu hình |
 | `auto_breakeven_on_partial` | `true` | Tự dời SL sau khi chốt, áp dụng cả TP1 |
 | `tp1_min_volume_action` | `breakeven` | `breakeven` hoặc `skip` |
-| `auto_cancel_pending_on_full_close` | `true` | Tự hủy nhánh chờ khi vị thế đóng hết |
+| `auto_cancel_pending_on_full_close` | `true` | Hủy Max Entry còn chờ khi Min Entry có lần chốt (giữ tên tham số cũ để tương thích) |
 | `allow_multiple_partial_closes` | `false` | Cho phép chốt thêm sau lần đầu |
 | `require_explicit_close` | `true` | Chặn từ khóa đóng lệnh mơ hồ |
 

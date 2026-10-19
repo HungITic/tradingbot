@@ -8,7 +8,7 @@ from app.models.config import BotConfig, ManagementRule
 from app.models.risk import BotEvent, RiskEvent
 from app.models.signal import ParsedSignal, Signal, SignalSource, SignalReceipt
 from app.models.statistics import DailyStatistic
-from app.models.trade import ManagementAction, Order, Position, Trade
+from app.models.trade import BrokerCommand, ManagementAction, Order, Position, Trade
 
 __all__ = [
     "Base",
@@ -20,6 +20,7 @@ __all__ = [
     "Order",
     "Position",
     "Trade",
+    "BrokerCommand",
     "ManagementAction",
     "BotConfig",
     "ManagementRule",

@@ -32,9 +32,9 @@ class PositionPolicyMixin:
                 "Chỉ có một TP: đóng toàn bộ tại TP đó.\n"
                 "\n<b>QUẢN LÝ NHÁNH</b>\nChốt bớt + xấu: chỉ chốt Min Entry theo tỷ lệ, giữ Max Entry.\n"
                 f"Chốt bớt chung dùng tỷ lệ cấu hình: {'bật' if cfg.generic_partial_uses_default else 'tắt'}.\n"
-                f"Hủy nhánh chờ sau khi vị thế đóng hết: {'bật' if cfg.auto_cancel_pending_on_full_close else 'tắt'}.\n"
+                f"Hủy Max Entry còn chờ khi Min Entry có lần chốt: {'bật' if cfg.auto_cancel_pending_on_full_close else 'tắt'}.\n"
                 f"Giữ SL đang bảo vệ tốt hơn: {'bật' if cfg.breakeven_only_improve else 'tắt'}.\n"
-                "SL ban đầu lấy từ tín hiệu; không tự chuyển về giữa hai entry.")
+                "SL/TP ban đầu: BUY trừ 0.5, SELL cộng 0.5 so với tín hiệu; không tự chuyển về giữa hai entry.")
 
     def partial_percentage(self, action):
         if action.target == "MIN_ENTRY" and action.percentage_source != "message":
@@ -152,6 +152,8 @@ class PositionPolicyMixin:
         except Exception as exc:
             return OrderResult(False, ticket=pos.ticket, comment=str(exc), raw={"not_divisible": isinstance(exc, PartialVolumeTooSmall)}), Decimal("0")
         result = await self.broker.close_position(pos.ticket, volume)
+        if result.success:
+            await self.cancel_dual_entry_pending_orders_on_close(pos.ticket, reason="Min Entry đã chốt một phần")
         return result, volume
 
     async def management_history(self, positions: list[PositionInfo]) -> tuple[set, set]:

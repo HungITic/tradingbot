@@ -189,6 +189,7 @@ def map_position_info(raw: Any) -> PositionInfo:
         commission=_safe_decimal(comm, "0.0"),
         position_type=pos_type,
         open_time=open_time_dt,
+        identifier=_safe_int(raw.get("identifier", 0) if isinstance(raw, dict) else getattr(raw, "identifier", 0)),
         magic=_safe_int(magic, 0),
         comment=str(comment or ""),
     )

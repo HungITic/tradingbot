@@ -175,8 +175,11 @@ class TradingSafetyMixin:
     async def emergency_stop(self) -> dict:
         """Pause first, serialize with signal execution, cancel pending orders before closing."""
         self.risk_config.enabled = False
-        saved = await self.save_risk_config_to_db(updated_by="KILL_SWITCH")
         async with self._execution_lock:
+            # A config transaction already in flight may have just published a candidate.
+            # Reassert and persist the pause after obtaining the execution lane.
+            self.risk_config.enabled = False
+            saved = await self.save_risk_config_to_db(updated_by="KILL_SWITCH")
             self._pending_overrides.clear()
             cancellations, closes = [], []
             errors = []

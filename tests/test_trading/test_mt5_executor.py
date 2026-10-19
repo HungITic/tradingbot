@@ -130,7 +130,11 @@ async def test_open_order_resolves_symbol(executor):
             volume=Decimal("0.01"),
             price=Decimal("4125.0"),
         )
-        res = await executor.open_order(req)
+        # This unit test checks routing only; real journal transactions have separate PG tests.
+        async def journal(client, api, request, **kwargs):
+            return await client.run_in_thread(api.order_send, request)
+        with patch('app.broker.mt5.executor.send_journaled', side_effect=journal):
+            res = await executor.open_order(req)
         assert res.success is True
         assert res.ticket == 99999
 

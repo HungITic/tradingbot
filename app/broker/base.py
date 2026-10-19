@@ -69,6 +69,7 @@ class OrderRequest:
     deviation: int = 20
     magic: int = 234000
     comment: str = ""
+    signal_id: int | None = None
 
 
 @dataclass
@@ -102,6 +103,7 @@ class PositionInfo:
     open_time: datetime
     magic: int = 0
     comment: str = ""
+    identifier: int = 0  # Stable POSITION_IDENTIFIER, which can differ from ticket.
 
 
 @dataclass
@@ -153,7 +155,7 @@ class ClosedPositionInfo:
     open_time: datetime | None
     close_time: datetime
     deals_count: int = 1
-    is_fully_closed: bool = True
+    is_fully_closed: bool | None = True
     total_volume: Decimal | None = None  # Initial / total volume
     currency: str = "USD"
     partial_deals: list[PartialCloseDealInfo] = field(default_factory=list)
@@ -257,8 +259,9 @@ class BrokerAdapter(ABC):
 
     @abstractmethod
     async def get_history_deals(
-        self, days: int = 7, symbol: str | None = None, start_time: datetime | None = None
+        self, days: int = 7, symbol: str | None = None, start_time: datetime | None = None,
+        position_id: int | None = None,
     ) -> list[DealInfo]:
-        """Fetch historical deals executed in the past `days` days, or from `start_time`."""
+        """Fetch deals by date range, or all deals for an exact broker position_id."""
         ...
 

@@ -214,123 +214,10 @@ def test_positions(mt5):
 
 
 def test_demo_order(mt5, symbol: str = "XAUUSD"):
-    """Test opening and closing a demo order."""
-    print_test(6, f"Demo Order (BUY 0.01 {symbol})")
-
-    print("\n  ⚠️  This will open a REAL order on your DEMO account.")
-    confirm = input("  Execute demo order? (y/n): ").strip().lower()
-    if confirm != "y":
-        print("  ⏭️ Skipped")
-        return True
-
-    # Get current price
-    tick = mt5.symbol_info_tick(symbol)
-    if tick is None:
-        print(f"  ❌ Cannot get tick: {mt5.last_error()}")
-        return False
-
-    sym_info = mt5.symbol_info(symbol)
-    digits = sym_info.digits if sym_info else 3
-
-    # Safe SL/TP distances for Gold: $5.0 SL, $10.0 TP
-    sl_price = round(tick.ask - 5.0, digits)
-    tp_price = round(tick.ask + 10.0, digits)
-
-    # Open BUY order
-    request = {
-        "action": mt5.TRADE_ACTION_DEAL,
-        "symbol": symbol,
-        "volume": 0.01,
-        "type": mt5.ORDER_TYPE_BUY,
-        "price": tick.ask,
-        "sl": sl_price,
-        "tp": tp_price,
-        "deviation": 20,
-        "magic": 234000,
-        "comment": "trading-bot-phase0-test",
-        "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
-    }
-
-    print(f"\n  Sending BUY order:")
-    print(f"    Price:  {request['price']}")
-    print(f"    SL:     {request['sl']}")
-    print(f"    TP:     {request['tp']}")
-    print(f"    Volume: {request['volume']}")
-
-    start = time.time()
-    result = mt5.order_send(request)
-    elapsed = (time.time() - start) * 1000
-
-    if result is None:
-        print(f"  ❌ order_send returned None: {mt5.last_error()}")
-        return False
-
-    print(f"\n  Result:")
-    print(f"    Retcode:  {result.retcode}")
-    print(f"    Comment:  {result.comment}")
-    print(f"    Order:    {result.order}")
-    print(f"    Latency:  {elapsed:.0f}ms")
-
-    trade_done = getattr(mt5, "TRADE_RETCODE_DONE", 10009)
-    if result.retcode != trade_done:
-        print(f"  ❌ Order failed!")
-        print(f"  💡 Retcode {result.retcode}: {result.comment}")
-        if result.retcode == 10027:
-            print("  👉 Please click the 'Algo Trading' button on the top toolbar of MetaTrader 5 (make sure it's GREEN).")
-        return False
-
-    print(f"  ✅ BUY order opened! Ticket: {result.order}")
-    ticket = result.order
-
-    # Test modify SL/TP ($3.0 SL, $15.0 TP)
-    print(f"\n  Modifying SL/TP on ticket {ticket}...")
-    modify_request = {
-        "action": mt5.TRADE_ACTION_SLTP,
-        "position": ticket,
-        "symbol": symbol,
-        "sl": round(tick.ask - 3.0, digits),
-        "tp": round(tick.ask + 15.0, digits),
-    }
-
-    start = time.time()
-    mod_result = mt5.order_send(modify_request)
-    elapsed = (time.time() - start) * 1000
-
-    if mod_result and mod_result.retcode == trade_done:
-        print(f"  ✅ SL/TP modified ({elapsed:.0f}ms)")
-    else:
-        comment = mod_result.comment if mod_result else mt5.last_error()
-        print(f"  ⚠️ Modify failed: {comment}")
-
-    # Close order
-    print(f"\n  Closing position {ticket}...")
-    tick = mt5.symbol_info_tick(symbol)
-    close_request = {
-        "action": mt5.TRADE_ACTION_DEAL,
-        "position": ticket,
-        "symbol": symbol,
-        "volume": 0.01,
-        "type": mt5.ORDER_TYPE_SELL,
-        "price": tick.bid,
-        "deviation": 20,
-        "magic": 234000,
-        "comment": "trading-bot-phase0-close",
-        "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
-    }
-
-    start = time.time()
-    close_result = mt5.order_send(close_request)
-    elapsed = (time.time() - start) * 1000
-
-    if close_result and close_result.retcode == trade_done:
-        print(f"  ✅ Position closed ({elapsed:.0f}ms)")
-    else:
-        comment = close_result.comment if close_result else mt5.last_error()
-        print(f"  ⚠️ Close failed: {comment}")
-        print(f"  💡 You may need to close ticket {ticket} manually in MT5")
-
+    """Keep this bridge diagnostic read-only; all mutations use the trading coordinator."""
+    print_test(6, "Demo Order — skipped")
+    print("  ⏭️ Không gửi lệnh trực tiếp từ script kiểm tra bridge.")
+    print("  Gửi lệnh kiểm thử qua bot để đi qua nhật ký DB và khóa thực thi.")
     return True
 
 
@@ -395,7 +282,7 @@ def main():
     results["symbol_info"] = test_symbol_info(mt5, gold_symbol)
     results["positions"] = test_positions(mt5)
 
-    # Test 6: Write operations (interactive)
+    # Test 6: Report that raw write operations are disabled
     results["demo_order"] = test_demo_order(mt5, gold_symbol)
 
     # Test 7: Latency

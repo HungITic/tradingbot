@@ -39,6 +39,7 @@ class Application:
     def __init__(self) -> None:
         self._running = False
         self._stop_event = asyncio.Event()
+        self._db_lease = None
 
     async def start(self) -> None:
         """Start all services."""
@@ -53,6 +54,8 @@ class Application:
             # 1. Database
             logger.info("initializing_database")
             await init_db()
+            from app.config.database import acquire_application_lock
+            self._db_lease = await acquire_application_lock()
             logger.info("database_ready")
 
             # 1.1 Verify and seed initial configuration & rules into DB
@@ -137,7 +140,7 @@ class Application:
 
         # 1. Stop Sync Job
         try:
-            trading_service.stop_sync_job()
+            await trading_service.stop_sync_job()
         except Exception as e:
             logger.warning("error_stopping_sync_job", error=str(e))
 
@@ -155,12 +158,16 @@ class Application:
 
         # 3. Disconnect Broker
         try:
-            await trading_service.broker.disconnect()
+            async with trading_service._execution_lock:
+                await trading_service.broker.disconnect()
         except Exception as e:
             logger.warning("error_disconnecting_broker", error=str(e))
 
         # 4. Close DB
         try:
+            if self._db_lease is not None:
+                await self._db_lease.close()
+                self._db_lease = None
             await close_db()
         except Exception as e:
             logger.warning("error_closing_db", error=str(e))

@@ -536,7 +536,8 @@ async def test_service_combo_chot_bot_and_dich_stoploss(mock_broker):
 
 
 @pytest.mark.asyncio
-async def test_service_management_rules_add_and_remove(mock_broker):
+async def test_service_management_rules_add_and_remove(mock_broker, mock_db_session):
+    mock_db_session.execute.return_value.scalar_one_or_none.return_value = None
     service = TradingService(broker=mock_broker, risk_config=RiskConfig())
 
     # 1. Add new custom Vietnamese keyword rule
@@ -840,7 +841,7 @@ async def test_map_deal_info_mt5_mac_and_windows():
 
 
 @pytest.mark.asyncio
-async def test_service_get_closed_positions_comment_fallback(mock_broker):
+async def test_service_does_not_guess_position_identity_from_comment(mock_broker):
     from datetime import datetime
 
     deals_sample = [
@@ -881,11 +882,10 @@ async def test_service_get_closed_positions_comment_fallback(mock_broker):
     service = TradingService(broker=mock_broker, risk_config=RiskConfig())
     positions = await service.get_closed_positions(days=7)
 
-    assert len(positions) == 1
-    assert positions[0].ticket == 998877
-    assert positions[0].deals_count == 2
-    assert positions[0].volume == Decimal("0.05")
-    assert positions[0].profit == Decimal("70.00")
+    assert len(positions) == 2
+    assert {p.ticket for p in positions} == {301, 302}
+    assert all(p.is_fully_closed is None for p in positions)
+    assert sum(p.profit for p in positions) == Decimal("70.00")
 
 
 @pytest.mark.asyncio

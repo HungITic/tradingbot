@@ -102,6 +102,39 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
         self._ticket_to_msg_id: dict[int, int] = {}
         self._ticket_to_symbol: dict[int, str] = {}
         self._cancelled_dual_entry_tickets: set[int] = set()
+        self._position_opening_orders: dict[int, int] = {}
+        self._position_entry_deals: dict[int, dict[int, DealInfo]] = {}
+        self._pending_cancel_lock = asyncio.Lock()
+
+    def remember_position_orders(self, deals) -> None:
+        """Use only broker entry deals to associate stable position IDs with opening orders."""
+        for deal in sorted(deals, key=lambda d: (d.time, d.ticket)):
+            if deal.entry == "IN" and deal.position_id > 0 and deal.order > 0:
+                self._position_opening_orders.setdefault(deal.position_id, deal.order)
+                self._position_entry_deals.setdefault(deal.position_id, {})[deal.ticket] = deal
+
+    async def with_position_entries(self, deals):
+        """Recover entries older than the requested window by exact broker position ID."""
+        entries = {d.position_id for d in deals if d.entry == "IN" and d.position_id > 0}
+        missing = {d.position_id for d in deals
+                   if d.position_id > 0 and d.entry in {"OUT", "OUT_BY", "INOUT"}} - entries
+        result = {d.ticket: d for d in deals}
+        self.remember_position_orders(deals)
+        for position_id in sorted(missing):
+            cached = self._position_entry_deals.get(position_id)
+            if cached:
+                result.update(cached)
+                continue
+            try:
+                history = await self.broker.get_history_deals(position_id=position_id)
+                for deal in history:
+                    if deal.position_id == position_id and deal.entry == "IN":
+                        result.setdefault(deal.ticket, deal)
+            except Exception as exc:
+                logger.warning("position_entry_history_unavailable", position_id=position_id, error=str(exc))
+        values = list(result.values())
+        self.remember_position_orders(values)
+        return values
 
     def format_notification(self, text: str, message_link: str | None = None) -> str:
         """Attach clickable source message link to notification if available."""
@@ -137,11 +170,15 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
         if getattr(self, "_sync_task", None) is None:
             self._sync_task = asyncio.create_task(self._sync_loop())
 
-    def stop_sync_job(self) -> None:
+    async def stop_sync_job(self) -> None:
         """Stop the background MT5 sync task."""
         task = getattr(self, "_sync_task", None)
         if task and not task.done():
             task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
             self._sync_task = None
 
     async def _sync_loop(self) -> None:
@@ -168,9 +205,11 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
 
                 # Fetch new deals
                 deals = await self.broker.get_history_deals(start_time=self._last_sync_time)
+                # Complete identities without replaying historical entry notifications.
+                await self.with_position_entries(deals)
                 
-                # Update last sync time slightly overlapping
-                self._last_sync_time = datetime.now() - timedelta(seconds=2)
+                # Keep the previous cursor until all persistence in this batch succeeds.
+                next_sync_time = datetime.now() - timedelta(seconds=2)
                 
                 # Check for updates in DB
                 for deal in deals:
@@ -204,7 +243,7 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
                             await self.notify(closed_msg)
 
                             # Dual Entry: cancel remaining pending limit order if this position closed
-                            closed_pos_ticket = deal.position_id if deal.position_id > 0 else deal.order
+                            closed_pos_ticket = deal.position_id
                             if closed_pos_ticket > 0:
                                 await self.cancel_dual_entry_pending_orders_on_close(
                                     closed_pos_ticket, reason=reason_str
@@ -217,6 +256,7 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
 
                 # Reconcile dual-entry pending orders (cancel remaining limit if sibling closed)
                 await self._reconcile_dual_entry_pending_orders()
+                self._last_sync_time = next_sync_time
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -228,16 +268,19 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
     async def _insert_trade_record(self, deal: DealInfo) -> bool:
         try:
             from app.config.database import get_session
-            from sqlalchemy import select
+            from sqlalchemy.dialects.postgresql import insert
+            from sqlalchemy import update
             from app.models.trade import Trade
             
             async with get_session() as session:
-                # Check if deal already inserted
-                stmt = select(Trade.id).where(Trade.mt5_ticket == deal.ticket)
-                exists = await session.scalar(stmt)
-                if not exists:
-                    trade = Trade(
+                if deal.position_id > 0:
+                    await session.execute(update(Trade).where(Trade.mt5_ticket == deal.ticket,
+                        Trade.mt5_position_id.is_(None)).values(
+                            mt5_position_id=deal.position_id, mt5_order_ticket=deal.order or None))
+                inserted = await session.execute(insert(Trade).values(
                         mt5_ticket=deal.ticket,
+                        mt5_position_id=deal.position_id or None,
+                        mt5_order_ticket=deal.order or None,
                         mt5_deal_type=0 if deal.deal_type == "BUY" else 1,
                         symbol=deal.symbol,
                         volume=deal.volume,
@@ -246,14 +289,11 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
                         swap=deal.swap,
                         commission=deal.commission,
                         executed_at=deal.time
-                    )
-                    session.add(trade)
-                    # Commit handled by context manager
-                    return True
-                return False
+                    ).on_conflict_do_nothing(index_elements=[Trade.mt5_ticket]).returning(Trade.id))
+                return inserted.scalar_one_or_none() is not None
         except Exception as e:
             logger.error("insert_trade_failed", error=str(e))
-            return False
+            raise
 
     async def _insert_management_action(self, signal_db_id: int | None, mt5_ticket: int, action_type: str, parameters: dict, status: str, result: dict) -> None:
         try:
@@ -277,6 +317,8 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
                 session.add(action)
         except Exception as e:
             logger.error("insert_management_action_failed", error=str(e))
+            self.risk_config.enabled = False
+            raise
 
     async def _update_db_order_status(self, mt5_ticket: int, status: str) -> bool:
         """Returns True if a row was actually updated (meaning it was PLACED before)."""
@@ -289,7 +331,7 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
                 stmt = (
                     update(DBOrder)
                     .where(DBOrder.mt5_ticket == mt5_ticket)
-                    .where(DBOrder.status == "PLACED") # Only update if it's currently PLACED
+                    .where(DBOrder.status.in_(["PLACED", "PENDING"]))
                     .values(status=status)
                 )
                 res = await session.execute(stmt)
@@ -344,6 +386,10 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
                     messages.append("⛔ Bot đã tạm dừng; không gửi thêm lệnh.")
                     break
                 result = await self.broker.open_order(req)
+                if result.raw.get("uncertain"):
+                    self.risk_config.enabled = False
+                    messages.append("⛔ Kết quả MT5 chưa xác định; đã dừng các nhánh tiếp theo để đối soát.")
+                    break
                 if result.success:
                     successes += 1
                     await self._record_db_order(entry.get("db_id"), result, req,
@@ -372,28 +418,13 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
         if not result.success or not result.ticket:
             return
 
-        ticket = result.ticket
-        if message_link:
-            self._order_message_links[ticket] = message_link
-
-        if telegram_message_id is not None:
-            self._signal_msg_id_to_tickets.setdefault(telegram_message_id, []).append(ticket)
-            self._ticket_to_msg_id[ticket] = telegram_message_id
-
-        if signal_db_id is not None:
-            self._signal_db_id_to_tickets.setdefault(signal_db_id, []).append(ticket)
-            self._ticket_to_signal_db_id[ticket] = signal_db_id
-
-        self._ticket_to_symbol[ticket] = order_req.symbol
-
-        if not signal_db_id:
-            return
         try:
             from app.config.database import get_session
             from app.models.trade import Order as DBOrder
 
             async with get_session() as session:
-                order_rec = DBOrder(
+                from sqlalchemy.dialects.postgresql import insert
+                await session.execute(insert(DBOrder).values(
                     signal_id=signal_db_id,
                     mt5_ticket=result.ticket,
                     symbol=order_req.symbol,
@@ -407,75 +438,73 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
                     status=status,
                     mt5_retcode=result.retcode,
                     mt5_comment=result.comment,
-                )
-                session.add(order_rec)
+                ).on_conflict_do_nothing(index_elements=[DBOrder.mt5_ticket]))
         except Exception as e:
-            logger.warning("db_order_record_failed", error=str(e))
+            self.risk_config.enabled = False
+            logger.error("db_order_record_failed", error=str(e))
+            raise
+
+        ticket = result.ticket
+        if message_link:
+            self._order_message_links[ticket] = message_link
+
+        if telegram_message_id is not None:
+            tickets = self._signal_msg_id_to_tickets.setdefault(telegram_message_id, [])
+            if ticket not in tickets:
+                tickets.append(ticket)
+            self._ticket_to_msg_id[ticket] = telegram_message_id
+
+        if signal_db_id is not None:
+            tickets = self._signal_db_id_to_tickets.setdefault(signal_db_id, [])
+            if ticket not in tickets:
+                tickets.append(ticket)
+            self._ticket_to_signal_db_id[ticket] = signal_db_id
+
+        self._ticket_to_symbol[ticket] = order_req.symbol
 
     async def cancel_dual_entry_pending_orders_on_close(
         self, closed_ticket: int, reason: str = ""
     ) -> list[int]:
+        async with self._pending_cancel_lock:
+            return await self._cancel_dual_entry_pending_orders_on_close(closed_ticket, reason)
+
+    async def signal_sibling_tickets(self, ticket: int) -> set[int]:
+        """Scope automatic cancellation to an exact stored signal, never just a message number."""
+        order_ticket = self._position_opening_orders.get(ticket, ticket)
+        signal_id = self._ticket_to_signal_db_id.get(order_ticket)
+        groups = ([self._signal_db_id_to_tickets.get(signal_id, [])] if signal_id is not None
+                  else [tickets for tickets in self._signal_db_id_to_tickets.values() if order_ticket in tickets])
+        if len(groups) == 1 and order_ticket in groups[0]:
+            return set(groups[0]) - {order_ticket}
+        from sqlalchemy import or_, select
+        from app.config.database import get_session
+        from app.models.trade import Order as DBOrder, Position as DBPosition
+        try:
+            async with get_session() as session:
+                signal_id = await session.scalar(select(DBOrder.signal_id)
+                    .outerjoin(DBPosition, DBPosition.order_id == DBOrder.id)
+                    .where(or_(DBOrder.mt5_ticket == order_ticket, DBPosition.mt5_ticket == ticket)))
+                if signal_id is not None:
+                    siblings = await session.scalars(select(DBOrder.mt5_ticket).where(
+                        DBOrder.signal_id == signal_id, DBOrder.mt5_ticket.isnot(None),
+                        DBOrder.mt5_ticket != order_ticket))
+                    return set(siblings.all())
+        except Exception as exc:
+            logger.warning("signal_siblings_unavailable", ticket=ticket, error=str(exc))
+        return set()
+
+    async def _cancel_dual_entry_pending_orders_on_close(
+        self, closed_ticket: int, reason: str = ""
+    ) -> list[int]:
         """
-        When an order/position of a dual-entry setup closes (due to TP, SL, or manual close),
-        automatically cancel any remaining pending orders (e.g. Max Entry limit order)
-        belonging to that same signal.
+        Cancel the same signal's waiting Max Entry after a confirmed Min Entry exit,
+        including a partial close. Filled positions are never cancelled here.
         """
         if not self.risk_config.auto_cancel_pending_on_full_close:
             return []
-        # An exit deal can represent only a partial close. Confirm the position is gone.
-        try:
-            if any(p.ticket == closed_ticket for p in await self.broker.get_positions()):
-                return []
-        except Exception:
-            return []
-        sibling_tickets: set[int] = set()
-
-        # 1. Resolve from in-memory tracking
-        sig_db_id = self._ticket_to_signal_db_id.get(closed_ticket)
-        if sig_db_id and sig_db_id in self._signal_db_id_to_tickets:
-            for t in self._signal_db_id_to_tickets[sig_db_id]:
-                if t != closed_ticket:
-                    sibling_tickets.add(t)
-
-        msg_id = self._ticket_to_msg_id.get(closed_ticket)
-        if msg_id and msg_id in self._signal_msg_id_to_tickets:
-            for t in self._signal_msg_id_to_tickets[msg_id]:
-                if t != closed_ticket:
-                    sibling_tickets.add(t)
-
-        if not sibling_tickets:
-            for s_tickets in self._signal_db_id_to_tickets.values():
-                if closed_ticket in s_tickets:
-                    for t in s_tickets:
-                        if t != closed_ticket:
-                            sibling_tickets.add(t)
-            for m_tickets in self._signal_msg_id_to_tickets.values():
-                if closed_ticket in m_tickets:
-                    for t in m_tickets:
-                        if t != closed_ticket:
-                            sibling_tickets.add(t)
-
-        # 2. Query Database (PostgreSQL) if not found in memory
-        if not sibling_tickets:
-            try:
-                from sqlalchemy import select
-                from app.config.database import get_session
-                from app.models.trade import Order as DBOrder
-
-                async with get_session() as session:
-                    stmt = select(DBOrder.signal_id).where(DBOrder.mt5_ticket == closed_ticket)
-                    signal_id = await session.scalar(stmt)
-                    if signal_id:
-                        stmt2 = select(DBOrder.mt5_ticket).where(
-                            DBOrder.signal_id == signal_id,
-                            DBOrder.mt5_ticket.isnot(None),
-                            DBOrder.mt5_ticket != closed_ticket,
-                        )
-                        db_siblings = (await session.scalars(stmt2)).all()
-                        for t in db_siblings:
-                            sibling_tickets.add(t)
-            except Exception as e:
-                logger.debug("resolve_db_siblings_error", error=str(e), closed_ticket=closed_ticket)
+        # A confirmed partial exit is sufficient; the remaining Min Entry may stay open.
+        closed_ticket = self._position_opening_orders.get(closed_ticket, closed_ticket)
+        sibling_tickets = await self.signal_sibling_tickets(closed_ticket)
 
         # 3. Check active pending orders from broker
         try:
@@ -491,6 +520,7 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
         pending_to_cancel = [
             po for po in all_pending
             if po.ticket in sibling_tickets and po.ticket not in self._cancelled_dual_entry_tickets
+            and getattr(po, "comment", "") in {"bot-max-entry", "bot-override-max"}
         ]
 
         if not pending_to_cancel:
@@ -516,7 +546,7 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
                         f"━━━━━━━━━━━━━━━━\n"
                         f"• <b>{po.symbol}</b> {po.order_type} <b>{po.volume} lot</b> @ <code>{po.price}</code>\n"
                         f"• Ticket đã hủy: <code>{po.ticket}</code>\n"
-                        f"• Lý do: Lệnh song sinh (Ticket <code>{closed_ticket}</code>) đã đóng{reason_desc}\n"
+                        f"• Lý do: Min Entry cùng signal đã có lần chốt{reason_desc}\n"
                         f"⏱ {now_str}"
                     )
                     await self.notify(self.format_notification(cancel_msg, msg_link))
@@ -539,10 +569,8 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
 
     async def _reconcile_dual_entry_pending_orders(self) -> list[int]:
         """
-        Reconcile active pending orders against active positions.
-        If any pending limit order belongs to a dual-entry signal whose
-        sibling order was placed/filled but is no longer open in active positions,
-        cancel the remaining pending order immediately.
+        Recover missed cancellations after restart or a failed broker request,
+        using confirmed exit deals even while the remaining Min Entry is open.
         """
         if not self.risk_config.auto_cancel_pending_on_full_close:
             return []
@@ -556,124 +584,41 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
             return []
 
         try:
-            positions = await self.broker.get_positions()
-        except Exception as e:
-            logger.error("reconcile_get_positions_failed", error=str(e))
-            return []
-
-        try:
             history = await self.broker.get_history_deals(days=7)
-            closed_tickets = {d.position_id for d in history if d.entry in {"OUT", "OUT_BY", "INOUT"}}
+            await self.with_position_entries(history)
+            closed_tickets = {self._position_opening_orders.get(d.position_id, d.position_id)
+                              for d in history if d.position_id > 0 and d.entry in {"OUT", "OUT_BY", "INOUT"}}
         except Exception:
             return []
-        live_pos_tickets = {p.ticket for p in positions}
         live_pending_tickets = {po.ticket for po in pending_orders}
 
         cancelled_tickets: list[int] = []
 
-        from app.config.database import get_session
-        from app.models.trade import Order as DBOrder
-        from sqlalchemy import select
-
         for po in pending_orders:
+            if getattr(po, "comment", "") not in {"bot-max-entry", "bot-override-max"}:
+                continue
             if po.ticket in self._cancelled_dual_entry_tickets:
                 continue
 
-            # 1. Find sibling tickets from in-memory cache first
-            sibling_tickets: set[int] = set()
-
-            sig_db_id = self._ticket_to_signal_db_id.get(po.ticket)
-            if sig_db_id and sig_db_id in self._signal_db_id_to_tickets:
-                for t in self._signal_db_id_to_tickets[sig_db_id]:
-                    if t != po.ticket:
-                        sibling_tickets.add(t)
-
-            msg_id = self._ticket_to_msg_id.get(po.ticket)
-            if msg_id and msg_id in self._signal_msg_id_to_tickets:
-                for t in self._signal_msg_id_to_tickets[msg_id]:
-                    if t != po.ticket:
-                        sibling_tickets.add(t)
-
-            if not sibling_tickets:
-                for s_tickets in self._signal_db_id_to_tickets.values():
-                    if po.ticket in s_tickets:
-                        for t in s_tickets:
-                            if t != po.ticket:
-                                sibling_tickets.add(t)
-                for m_tickets in self._signal_msg_id_to_tickets.values():
-                    if po.ticket in m_tickets:
-                        for t in m_tickets:
-                            if t != po.ticket:
-                                sibling_tickets.add(t)
-
-            # 2. If not found in memory, query Database
-            if not sibling_tickets:
-                try:
-                    async with get_session() as session:
-                        stmt = select(DBOrder.signal_id).where(DBOrder.mt5_ticket == po.ticket)
-                        signal_id = await session.scalar(stmt)
-                        if signal_id:
-                            stmt2 = select(DBOrder.mt5_ticket).where(
-                                DBOrder.signal_id == signal_id,
-                                DBOrder.mt5_ticket != po.ticket,
-                                DBOrder.mt5_ticket.isnot(None),
-                            )
-                            db_siblings = (await session.scalars(stmt2)).all()
-                            for t in db_siblings:
-                                sibling_tickets.add(t)
-                except Exception as e:
-                    logger.debug("reconcile_db_lookup_error", error=str(e), ticket=po.ticket)
+            sibling_tickets = await self.signal_sibling_tickets(po.ticket)
 
             if not sibling_tickets:
                 continue
 
-            # Check if any sibling was placed/filled, but is now neither in open positions nor pending orders
-            # Meaning: that sibling order has closed!
+            # A confirmed exit, including a partial one, triggers cancellation.
             should_cancel = False
             closed_sibling_ticket = None
             for s_ticket in sibling_tickets:
-                is_open = s_ticket in live_pos_tickets
                 is_pending = s_ticket in live_pending_tickets
-                if not is_open and not is_pending and s_ticket in closed_tickets:
+                if not is_pending and s_ticket in closed_tickets:
                     should_cancel = True
                     closed_sibling_ticket = s_ticket
                     break
 
             if should_cancel and closed_sibling_ticket:
-                try:
-                    res = await self.broker.cancel_order(po.ticket)
-                    if res.success:
-                        self._cancelled_dual_entry_tickets.add(po.ticket)
-                        cancelled_tickets.append(po.ticket)
-                        await self._update_db_order_status(po.ticket, "CANCELLED")
-
-                        msg_link = (
-                            self._order_message_links.get(po.ticket)
-                            or self._order_message_links.get(closed_sibling_ticket)
-                        )
-                        now_str = now_vietnam().strftime("%H:%M:%S %d/%m/%Y")
-                        cancel_msg = (
-                            f"🗑 <b>Hủy Lệnh Chờ Dual Entry</b>\n"
-                            f"━━━━━━━━━━━━━━━━\n"
-                            f"• <b>{po.symbol}</b> {po.order_type} <b>{po.volume} lot</b> @ <code>{po.price}</code>\n"
-                            f"• Ticket đã hủy: <code>{po.ticket}</code>\n"
-                            f"• Lý do: Lệnh song sinh (Ticket <code>{closed_sibling_ticket}</code>) đã đóng toàn bộ\n"
-                            f"⏱ {now_str}"
-                        )
-                        await self.notify(self.format_notification(cancel_msg, msg_link))
-                        logger.info(
-                            "reconcile_dual_entry_pending_order_cancelled",
-                            cancelled_ticket=po.ticket,
-                            closed_ticket=closed_sibling_ticket,
-                        )
-                    else:
-                        logger.warning(
-                            "reconcile_dual_entry_cancel_failed",
-                            ticket=po.ticket,
-                            comment=res.comment,
-                        )
-                except Exception as e:
-                    logger.error("reconcile_dual_entry_cancel_exception", ticket=po.ticket, error=str(e))
+                cancelled_tickets.extend(await self.cancel_dual_entry_pending_orders_on_close(
+                    closed_sibling_ticket, reason="Đã có deal chốt trong lịch sử"
+                ))
 
         return cancelled_tickets
 
@@ -765,7 +710,9 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
                     # The transaction commits before any broker mutation.
                     async with get_session() as session:
                         result = await session.execute(insert(SignalReceipt).values(
-                            chat_id=chat_id, message_id=message_id).on_conflict_do_nothing()
+                            chat_id=chat_id, message_id=message_id, raw_message=raw_text,
+                            context={k: str(v) if isinstance(v, datetime) else v for k, v in kwargs.items()})
+                            .on_conflict_do_nothing()
                             .returning(SignalReceipt.message_id))
                         claimed = result.scalar_one_or_none()
                     if claimed is None:
@@ -939,6 +886,7 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
                     tp1=signal.new_order.take_profit,
                     tp2=signal.new_order.take_profit_2,
                     comment="bot-override-min",
+                    signal_id=signal_db_id,
                 )
             if has_dual_entry and max_entry is not None:
                 pending_reqs["max"] = OrderRequest(
@@ -951,6 +899,7 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
                     tp1=signal.new_order.take_profit,
                     tp2=signal.new_order.take_profit_2,
                     comment="bot-override-max",
+                    signal_id=signal_db_id,
                 )
 
             context.planned_order_count = 2 if has_dual_entry else 1
@@ -1077,6 +1026,7 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
                 tp1=signal.new_order.take_profit,
                 tp2=signal.new_order.take_profit_2,
                 comment="bot-min-entry" if has_dual_entry else "bot-market",
+                    signal_id=signal_db_id,
             )
             problem = self.check_request(order_req_1)
             if problem:
@@ -1087,6 +1037,10 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
                 return
             result_1 = await self.broker.open_order(order_req_1)
             await self.set_signal_status(signal_db_id, "EXECUTED" if result_1.success else "ERROR", result_1.comment)
+            if result_1.raw.get("uncertain"):
+                self.risk_config.enabled = False
+                await self.notify("⛔ Chưa xác định kết quả MT5; đã tạm dừng để đối soát, không gửi nhánh tiếp theo.")
+                return
 
             if result_1.success:
                 self._recent_signals.append(
@@ -1141,6 +1095,7 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
                         tp1=signal.new_order.take_profit,
                         tp2=signal.new_order.take_profit_2,
                         comment="bot-max-entry",
+                        signal_id=signal_db_id,
                     )
                     problem = self.check_request(order_req_2)
                     if problem:
@@ -1303,18 +1258,21 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
         try:
             deals = (await self.broker.get_history_deals(start_time=start_time) if start_time is not None
                      else await self.broker.get_history_deals(days=days))
+            deals = await self.with_position_entries(deals)
         except Exception as e:
             logger.warning("get_closed_positions_history_failed", error=str(e))
             return []
 
         try:
             active_positions = await self.broker.get_positions()
-            active_tickets = {p.ticket for p in active_positions}
-            active_pos_map = {p.ticket: p for p in active_positions}
+            active_tickets = {identity for p in active_positions for identity in (p.ticket, p.identifier) if identity > 0}
+            active_pos_map = {identity: p for p in active_positions for identity in (p.ticket, p.identifier) if identity > 0}
+            positions_available = True
         except Exception as e:
             logger.warning("get_closed_positions_active_failed", error=str(e))
             active_tickets = set()
             active_pos_map = {}
+            positions_available = False
 
         currency = "USD"
         try:
@@ -1326,19 +1284,15 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
 
         from collections import defaultdict
 
-        import re
-
         grouped_deals: dict[int, list[DealInfo]] = defaultdict(list)
         for d in deals:
             # Skip balance/deposit records and invalid deals
             if not d.symbol or d.deal_type not in ("BUY", "SELL"):
                 continue
             pos_id = d.position_id
-            if pos_id <= 0 and d.comment:
-                match = re.search(r"#?(\d{6,})", d.comment)
-                if match:
-                    pos_id = int(match.group(1))
             if pos_id <= 0:
+                # Keep an unresolved deal separate; never interpret a price or order
+                # number in a broker comment as proof of position identity.
                 pos_id = d.order if d.order > 0 else d.ticket
             if pos_id <= 0:
                 continue
@@ -1414,7 +1368,8 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
                 missing_entry_pos_ids.append(pos_id)
 
             close_time = max(d.time for d in out_deals)
-            is_fully_closed = pos_id not in active_tickets
+            is_fully_closed = (pos_id not in active_tickets
+                               if positions_available and all(d.position_id > 0 for d in p_deals) else None)
             deals_count = len(out_deals)
 
             # Sort exit deals chronologically
@@ -1491,9 +1446,9 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
                     for item in aggregated:
                         pid = item["ticket"]
                         if item["open_price"] is None:
-                            if pid in db_positions and db_positions[pid].entry_price is not None:
-                                item["open_price"] = db_positions[pid].entry_price
-                                item["open_time"] = db_positions[pid].created_at
+                            if pid in db_positions and db_positions[pid].open_price is not None:
+                                item["open_price"] = db_positions[pid].open_price
+                                item["open_time"] = db_positions[pid].opened_at
                                 if db_positions[pid].volume:
                                     item["total_volume"] = max(Decimal(str(db_positions[pid].volume)), item["volume"])
                             elif pid in db_orders and db_orders[pid].price is not None:
@@ -1679,8 +1634,9 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
             self.risk_config.enabled = False
         return self.risk_config
 
-    async def save_risk_config_to_db(self, updated_by: str = "SYSTEM") -> bool:
+    async def save_risk_config_to_db(self, updated_by: str = "SYSTEM", config: RiskConfig | None = None) -> bool:
         """Persist current risk_config state to PostgreSQL bot_config table."""
+        config = config if config is not None else self.risk_config
         try:
             from sqlalchemy import select
             from app.config.database import get_session
@@ -1688,42 +1644,42 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
 
             grouped_configs = {
                 ("trading", "general"): {
-                    "enabled": bool(self.risk_config.enabled),
-                    "allowed_symbols": list(self.risk_config.allowed_symbols),
+                    "enabled": bool(config.enabled),
+                    "allowed_symbols": list(config.allowed_symbols),
                     "trading_hours": "ALL",
                 },
                 ("risk", "limits"): {
-                    "max_open_positions": int(self.risk_config.max_open_positions),
-                    "max_lot": float(self.risk_config.max_lot),
-                    "min_lot": float(self.risk_config.min_lot),
-                    "default_lot": float(self.risk_config.default_lot),
-                    "max_daily_loss_percent": float(self.risk_config.max_daily_loss_percent),
-                    "require_sl": bool(self.risk_config.require_sl),
-                    "require_tp": bool(self.risk_config.require_tp),
+                    "max_open_positions": int(config.max_open_positions),
+                    "max_lot": str(config.max_lot),
+                    "min_lot": str(config.min_lot),
+                    "default_lot": str(config.default_lot),
+                    "max_daily_loss_percent": str(config.max_daily_loss_percent),
+                    "require_sl": bool(config.require_sl),
+                    "require_tp": bool(config.require_tp),
                 },
                 ("risk", "dual_entry"): {
-                    "enable_dual_entry": bool(self.risk_config.enable_dual_entry),
-                    "lot_min_entry": float(self.risk_config.lot_min_entry),
-                    "lot_max_entry": float(self.risk_config.lot_max_entry),
-                    "max_slippage_entry": float(self.risk_config.max_slippage_entry),
+                    "enable_dual_entry": bool(config.enable_dual_entry),
+                    "lot_min_entry": str(config.lot_min_entry),
+                    "lot_max_entry": str(config.lot_max_entry),
+                    "max_slippage_entry": str(config.max_slippage_entry),
                 },
                 ("risk", "position_management"): {
-                    "default_partial_close_percent": float(self.risk_config.default_partial_close_percent),
-                    "auto_breakeven_on_partial": bool(self.risk_config.auto_breakeven_on_partial),
-                    "breakeven_mode": self.risk_config.breakeven_mode,
-                    "breakeven_only_improve": self.risk_config.breakeven_only_improve,
-                    "require_explicit_close": self.risk_config.require_explicit_close,
-                    "generic_partial_uses_default": self.risk_config.generic_partial_uses_default,
-                    "tp1_enabled": self.risk_config.tp1_enabled,
-                    "tp1_min_volume_action": self.risk_config.tp1_min_volume_action,
-                    "auto_cancel_pending_on_full_close": self.risk_config.auto_cancel_pending_on_full_close,
-                    "breakeven_offset_price": float(self.risk_config.breakeven_offset_price),
-                    "allow_multiple_partial_closes": bool(self.risk_config.allow_multiple_partial_closes),
+                    "default_partial_close_percent": str(config.default_partial_close_percent),
+                    "auto_breakeven_on_partial": bool(config.auto_breakeven_on_partial),
+                    "breakeven_mode": config.breakeven_mode,
+                    "breakeven_only_improve": config.breakeven_only_improve,
+                    "require_explicit_close": config.require_explicit_close,
+                    "generic_partial_uses_default": config.generic_partial_uses_default,
+                    "tp1_enabled": config.tp1_enabled,
+                    "tp1_min_volume_action": config.tp1_min_volume_action,
+                    "auto_cancel_pending_on_full_close": config.auto_cancel_pending_on_full_close,
+                    "breakeven_offset_price": str(config.breakeven_offset_price),
+                    "allow_multiple_partial_closes": bool(config.allow_multiple_partial_closes),
                 },
                 ("signal", "timing"): {
-                    "duplicate_timeout_seconds": int(self.risk_config.duplicate_timeout_seconds),
-                    "signal_expire_seconds": int(self.risk_config.signal_expire_seconds),
-                    "broker_utc_offset_hours": int(self.risk_config.broker_utc_offset_hours),
+                    "duplicate_timeout_seconds": int(config.duplicate_timeout_seconds),
+                    "signal_expire_seconds": int(config.signal_expire_seconds),
+                    "broker_utc_offset_hours": int(config.broker_utc_offset_hours),
                 },
             }
 
@@ -1767,17 +1723,21 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
                 candidate = self.risk_config.with_updates(updates)
             except (ValueError, TypeError):
                 return dict.fromkeys(updates, False)
-            previous = self.risk_config.model_dump()
+            if not await self.save_risk_config_to_db(updated_by=updated_by, config=candidate):
+                return dict.fromkeys(updates, False)
             for key, value in candidate.model_dump().items():
                 setattr(self.risk_config, key, value)
-            if not await self.save_risk_config_to_db(updated_by=updated_by):
-                for key, value in previous.items():
-                    setattr(self.risk_config, key, value)
-                return dict.fromkeys(updates, False)
             set_broker_utc_offset_hours(self.risk_config.broker_utc_offset_hours)
             return dict.fromkeys(updates, True)
 
     async def add_or_update_management_rule(
+        self, keyword: str, action_type_str: str, percentage: Decimal | None = None,
+        target: str | None = None, priority: int = 5,
+    ) -> bool:
+        async with self._execution_lock:
+            return await self._add_or_update_management_rule(keyword, action_type_str, percentage, target, priority)
+
+    async def _add_or_update_management_rule(
         self,
         keyword: str,
         action_type_str: str,
@@ -1801,15 +1761,6 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
         elif action_type in (ManagementType.MOVE_SL, ManagementType.BREAKEVEN):
             params["target"] = "ENTRY"
 
-        # 1. Update in memory
-        self.parser.rule_engine.add_or_update_rule(
-            keyword=clean_kw,
-            action_type=action_type,
-            params=params,
-            priority=priority,
-        )
-
-        # 2. Persist to PostgreSQL
         try:
             from sqlalchemy import select
             from app.config.database import get_session
@@ -1833,15 +1784,20 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
                         enabled=True,
                     )
                     session.add(new_rule)
+            self.parser.rule_engine.add_or_update_rule(
+                keyword=clean_kw, action_type=action_type, params=params, priority=priority)
             return True
         except Exception as e:
             logger.error("save_management_rule_db_failed", keyword=clean_kw, error=str(e))
-            return True
+            return False
 
     async def remove_management_rule(self, keyword: str) -> bool:
+        async with self._execution_lock:
+            return await self._remove_management_rule(keyword)
+
+    async def _remove_management_rule(self, keyword: str) -> bool:
         """Remove a rule from memory and database."""
         clean_kw = keyword.lower().strip()
-        mem_ok = self.parser.rule_engine.remove_rule(clean_kw)
 
         try:
             from sqlalchemy import delete
@@ -1853,8 +1809,8 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
                 await session.execute(stmt)
         except Exception as e:
             logger.error("delete_management_rule_db_failed", keyword=clean_kw, error=str(e))
-
-        return mem_ok
+            return False
+        return self.parser.rule_engine.remove_rule(clean_kw)
 
 
 # Global singleton instance

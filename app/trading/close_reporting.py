@@ -111,8 +111,9 @@ class CloseReportingMixin:
                 field("Giá đóng", price(deal.price), code=True)),
             section("LÝ DO THỰC HIỆN", escape(reason)),
             "<i>PnL gồm swap và commission lần chốt; chưa phân bổ phí mở lệnh.</i>"]
-        link = self._order_message_links.get(deal.position_id)
+        opening_order = self._position_opening_orders.get(deal.position_id, deal.position_id)
+        link = self._order_message_links.get(opening_order)
         if not link:
-            signal_id = self._ticket_to_signal_db_id.get(deal.position_id)
+            signal_id = self._ticket_to_signal_db_id.get(opening_order)
             link = self._signal_message_links.get(signal_id)
         return self.format_notification(join_cards(blocks), link), reason

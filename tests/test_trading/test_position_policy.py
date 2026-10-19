@@ -180,18 +180,18 @@ async def test_partial_honors_nonstandard_broker_volume_step(svc):
 
 
 @pytest.mark.asyncio
-async def test_partial_close_keeps_pending_sibling(svc):
+async def test_partial_close_cancels_pending_max_entry(svc):
     svc._signal_db_id_to_tickets = {10: [1, 2]}
     svc.broker.get_positions.return_value = [position(volume='.05')]
-    svc.broker.get_pending_orders.return_value = [SimpleNamespace(ticket=2)]
-    assert await svc.cancel_dual_entry_pending_orders_on_close(1) == []
-    svc.broker.cancel_order.assert_not_awaited()
+    svc.broker.get_pending_orders.return_value = [SimpleNamespace(ticket=2, comment='bot-max-entry')]
+    assert await svc.cancel_dual_entry_pending_orders_on_close(1) == [2]
+    svc.broker.cancel_order.assert_awaited_once_with(2)
 
 
 @pytest.mark.asyncio
 async def test_pending_cancellation_can_be_disabled_and_failure_is_retryable(svc):
     svc._signal_db_id_to_tickets = {10: [1, 2]}
-    svc.broker.get_pending_orders.return_value = [SimpleNamespace(ticket=2)]
+    svc.broker.get_pending_orders.return_value = [SimpleNamespace(ticket=2, comment='bot-max-entry')]
     svc.risk_config.auto_cancel_pending_on_full_close = False
     await svc.cancel_dual_entry_pending_orders_on_close(1)
     svc.broker.cancel_order.assert_not_awaited()
@@ -205,7 +205,7 @@ async def test_pending_cancellation_can_be_disabled_and_failure_is_retryable(svc
 @pytest.mark.asyncio
 async def test_reconcile_does_not_guess_that_missing_sibling_is_closed(svc):
     svc._signal_db_id_to_tickets = {10: [1, 2]}
-    svc.broker.get_pending_orders.return_value = [SimpleNamespace(ticket=2)]
+    svc.broker.get_pending_orders.return_value = [SimpleNamespace(ticket=2, comment='bot-max-entry')]
     assert await svc._reconcile_dual_entry_pending_orders() == []
     svc.broker.cancel_order.assert_not_awaited()
 

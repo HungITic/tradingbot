@@ -22,6 +22,8 @@ from app.broker.base import (
     TickInfo,
 )
 from app.broker.mt5.client import mt5, mt5_client
+from app.broker.mt5.history import read_history_deals
+from app.broker.mt5.journal import send_journaled
 from app.broker.mt5.constants import (
     ORDER_FILLING_IOC,
     ORDER_FILLING_RETURN,
@@ -341,12 +343,12 @@ class MT5Executor(BrokerAdapter):
 
         logger.info("mt5_sending_order", request=req_dict)
         try:
-            raw_res = await self._client.run_in_thread(mt5.order_send, req_dict)
+            raw_res = await send_journaled(self._client, mt5, req_dict, opening=request)
             result = map_order_result(raw_res)
         except Exception as e:
             logger.error("mt5_order_send_exception", error=str(e))
             self._client._connected = False
-            return OrderResult(success=False, comment=f"Order send failed: {e}")
+            return OrderResult(success=False, comment=f"Order send failed: {e}", raw={"uncertain": True})
 
         if result.success:
             logger.info("mt5_order_success", ticket=result.ticket, price=result.price)
@@ -384,12 +386,12 @@ class MT5Executor(BrokerAdapter):
 
         logger.info("mt5_modifying_position", ticket=ticket, sl=sl, tp=tp)
         try:
-            raw_res = await self._client.run_in_thread(mt5.order_send, req_dict)
+            raw_res = await send_journaled(self._client, mt5, req_dict)
             return map_order_result(raw_res)
         except Exception as e:
             logger.error("mt5_modify_position_exception", error=str(e))
             self._client._connected = False
-            return OrderResult(success=False, ticket=ticket, comment=f"Modify position failed: {e}")
+            return OrderResult(success=False, ticket=ticket, comment=f"Modify position failed: {e}", raw={"uncertain": True})
 
     async def cancel_order(self, ticket: int) -> OrderResult:
         if not self._client.is_connected or mt5 is None:
@@ -402,12 +404,12 @@ class MT5Executor(BrokerAdapter):
         }
         logger.info("mt5_canceling_order", ticket=ticket)
         try:
-            raw_res = await self._client.run_in_thread(mt5.order_send, req_dict)
+            raw_res = await send_journaled(self._client, mt5, req_dict)
             return map_order_result(raw_res)
         except Exception as e:
             logger.error("mt5_cancel_order_exception", error=str(e))
             self._client._connected = False
-            return OrderResult(success=False, ticket=ticket, comment=f"Cancel order failed: {e}")
+            return OrderResult(success=False, ticket=ticket, comment=f"Cancel order failed: {e}", raw={"uncertain": True})
 
     async def close_position(
         self,
@@ -451,17 +453,18 @@ class MT5Executor(BrokerAdapter):
 
         logger.info("mt5_closing_position", ticket=ticket, volume=close_volume)
         try:
-            raw_res = await self._client.run_in_thread(mt5.order_send, req_dict)
+            raw_res = await send_journaled(self._client, mt5, req_dict)
             return map_order_result(raw_res)
         except Exception as e:
             logger.error("mt5_close_position_exception", error=str(e))
             self._client._connected = False
-            return OrderResult(success=False, ticket=ticket, comment=f"Close position failed: {e}")
+            return OrderResult(success=False, ticket=ticket, comment=f"Close position failed: {e}", raw={"uncertain": True})
 
     async def get_history_deals(
-        self, days: int = 7, symbol: str | None = None, start_time: datetime | None = None
+        self, days: int = 7, symbol: str | None = None, start_time: datetime | None = None,
+        position_id: int | None = None,
     ) -> list[DealInfo]:
-        """Fetch historical executed deals within the last `days` days."""
+        """Fetch historical deals by date range or exact stable position ID."""
         if not self._client.is_connected or mt5 is None:
             raise RuntimeError("MT5 history is unavailable")
 
@@ -478,10 +481,10 @@ class MT5Executor(BrokerAdapter):
         raw_list = None
         try:
             # mt5_mac JSON-RPC requires int timestamps; native MetaTrader5 accepts either
-            raw_list = await self._client.run_in_thread(mt5.history_deals_get, from_ts, to_ts)
+            raw_list = await self._client.run_in_thread(read_history_deals, mt5, from_ts, to_ts, position_id=position_id)
         except Exception:
             try:
-                raw_list = await self._client.run_in_thread(mt5.history_deals_get, past, now)
+                raw_list = await self._client.run_in_thread(read_history_deals, mt5, past, now, position_id=position_id)
             except Exception as e2:
                 logger.warning("mt5_history_deals_failed", error=str(e2))
                 self._client._connected = False
@@ -493,6 +496,8 @@ class MT5Executor(BrokerAdapter):
             return []
 
         deals = [map_deal_info(d) for d in raw_list]
+        if position_id is not None:
+            deals = [d for d in deals if d.position_id == position_id]
         if symbol:
             resolved = await self.resolve_symbol(symbol)
             req_clean = symbol.strip().upper().replace("#", "")

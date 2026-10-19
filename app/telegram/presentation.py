@@ -70,7 +70,8 @@ def join_cards(cards):
 
 def history_card(pos):
     from app.core.timezone import format_vietnam_time
-    status = "Đã đóng hết" if pos.is_fully_closed else "Còn giữ vị thế"
+    status = ("Chưa xác định trạng thái" if pos.is_fully_closed is None else
+              "Đã đóng hết" if pos.is_fully_closed else "Còn giữ vị thế")
     return "\n".join([
         heading(f"{pos.symbol} · {pos.position_type}") + f" · <code>#{pos.ticket}</code>",
         f"PnL đã chốt <b>{escape(money(pos.net_pnl, pos.currency, signed=True))}</b> · Đóng {number(pos.volume)}/{number(pos.total_volume)} lot",

@@ -264,6 +264,7 @@ class MT5Client:
     def __init__(self) -> None:
         self._connected = False
         self._lock = asyncio.Lock()
+        self._io_lock = asyncio.Lock()
 
     @property
     def is_connected(self) -> bool:
@@ -271,7 +272,17 @@ class MT5Client:
 
     async def run_in_thread(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         """Execute a synchronous MT5 call in a thread pool."""
-        return await asyncio.to_thread(func, *args, **kwargs)
+        # The Wine bridge shares one stdin/stdout stream across all callers.
+        # Cancellation must not release the lane while its worker is still using it.
+        async with self._io_lock:
+            task = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                try:
+                    await task
+                finally:
+                    raise
 
     async def connect(self) -> bool:
         """Initialize connection to MT5 terminal."""

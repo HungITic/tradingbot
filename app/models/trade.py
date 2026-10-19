@@ -17,6 +17,8 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    CheckConstraint,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -36,6 +38,7 @@ class Order(Base):
     """
 
     __tablename__ = "orders"
+    __table_args__ = (UniqueConstraint("mt5_ticket", name="uq_orders_mt5_ticket"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     signal_id: Mapped[int | None] = mapped_column(
@@ -133,12 +136,15 @@ class Trade(Base):
     """
 
     __tablename__ = "trades"
+    __table_args__ = (UniqueConstraint("mt5_ticket", name="uq_trades_mt5_ticket"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     position_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("positions.id"), nullable=True
     )
     mt5_ticket: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    mt5_position_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    mt5_order_ticket: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     mt5_deal_type: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     symbol: Mapped[str | None] = mapped_column(String(20))
@@ -199,3 +205,18 @@ class ManagementAction(Base):
     position: Mapped[Position | None] = relationship(
         back_populates="management_actions"
     )
+
+
+class BrokerCommand(Base, TimestampMixin):
+    """Durable write-ahead record; ambiguous commands must never be resent blindly."""
+
+    __tablename__ = "broker_commands"
+    __table_args__ = (CheckConstraint(
+        "status IN ('SUBMITTED', 'CONFIRMED', 'REJECTED', 'UNKNOWN')", name="ck_broker_command_status"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    account_key: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    signal_id: Mapped[int | None] = mapped_column(ForeignKey("signals.id"), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    request: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    response: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

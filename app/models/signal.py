@@ -135,3 +135,5 @@ class SignalReceipt(Base):
     chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     message_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    raw_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    context: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
