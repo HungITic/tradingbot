@@ -16,7 +16,7 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVICE_NAME="com.tradingbot"
 PLIST_SRC="$PROJECT_DIR/scripts/com.tradingbot.plist"
 PLIST_DEST="$HOME/Library/LaunchAgents/$SERVICE_NAME.plist"
-LOG_FILE="$PROJECT_DIR/logs/bot.log"
+LOG_FILE="$PROJECT_DIR/logs/bot_error.log"
 ERR_FILE="$PROJECT_DIR/logs/bot_error.log"
 
 # Colors for terminal output
@@ -71,7 +71,7 @@ start_service() {
     # 2. Nếu launchctl không chạy được (ví dụ kết nối qua SSH không có Aqua session), tự động chạy nền bằng nohup
     if ! pgrep -f "python.*run.py" >/dev/null; then
         echo -e "${YELLOW}ℹ️  LaunchAgent không phản hồi (thường do môi trường SSH), đang khởi động daemon nền (nohup)...${NC}"
-        nohup "$PROJECT_DIR/scripts/run_daemon.sh" >> "$LOG_FILE" 2>> "$ERR_FILE" &
+        nohup "$PROJECT_DIR/scripts/run_daemon.sh" >/dev/null 2>> "$ERR_FILE" &
         sleep 2
     fi
 
@@ -120,7 +120,7 @@ status_service() {
             echo -e "${RED}⚠️  Log lỗi gần nhất ($ERR_FILE):${NC}"
             tail -n 12 "$ERR_FILE"
         fi
-        if [ -s "$LOG_FILE" ]; then
+        if [ "$LOG_FILE" != "$ERR_FILE" ] && [ -s "$LOG_FILE" ]; then
             echo ""
             echo -e "${YELLOW}📜 Dòng log cuối ($LOG_FILE):${NC}"
             tail -n 8 "$LOG_FILE"
@@ -144,14 +144,14 @@ view_logs() {
     mkdir -p "$PROJECT_DIR/logs"
     touch "$LOG_FILE"
     echo -e "${BLUE}📜 Đang xem live log ($LOG_FILE)... Nhấn Ctrl+C để thoát.${NC}"
-    tail -f -n 50 "$LOG_FILE"
+    tail -F -n 50 "$LOG_FILE"
 }
 
 view_errors() {
     mkdir -p "$PROJECT_DIR/logs"
     touch "$ERR_FILE"
     echo -e "${RED}⚠️  Đang xem error log ($ERR_FILE)... Nhấn Ctrl+C để thoát.${NC}"
-    tail -f -n 50 "$ERR_FILE"
+    tail -F -n 50 "$ERR_FILE"
 }
 
 run_foreground() {

@@ -67,6 +67,10 @@ Khi bạn gập màn hình MacBook lại:
 
 ## 4. Quản Lý File Log
 
-Toàn bộ log đầu ra được tự động ghi vào thư mục `logs/`:
-- `logs/bot.log`: Log hoạt động thông thường (kết nối MT5, nhận tín hiệu, vào lệnh, khớp lệnh, dời SL/TP).
-- `logs/bot_error.log`: Log các lỗi crash nếu xảy ra.
+Bot chỉ ghi **ERROR và CRITICAL**, kể cả thư viện Telegram/Telethon và SQLAlchemy. Không bật SQL echo khi `DEBUG=true`; `LOG_LEVEL=INFO/DEBUG` trong cấu hình cũ không làm phát sinh log thông thường.
+
+- `logs/bot_error.log`: log lỗi hiện tại, gồm traceback. Khi chạy daemon, lỗi xảy ra trước khi app khởi tạo cũng được thu lại.
+- Xoay file lúc nửa đêm theo múi giờ máy chạy bot; giữ file hiện tại và tối đa hai file ngày trước, tổng cộng ba ngày log. Log cũ quá 72 giờ được dọn thêm theo thời gian sửa file.
+- Dọn lúc khởi động và kiểm tra mỗi phút khi bot chạy, kể cả khi không có lỗi mới. `bot.log` cũ quá hạn cũng được dọn; không ghi thêm log hoạt động vào file này.
+- `./scripts/bot.sh logs` và `./scripts/bot.sh errors` đều theo dõi file lỗi, tự tiếp tục khi file được xoay.
+- Chạy trực tiếp `.venv/bin/python run.py` vẫn ghi cùng file lỗi. Khi không có lỗi, Terminal có thể không xuất log.

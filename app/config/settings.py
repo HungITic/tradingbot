@@ -116,7 +116,7 @@ class AppSettings(BaseSettings):
     )
 
     debug: bool = False
-    log_level: str = "INFO"
+    log_level: str = "ERROR"
 
     db: DatabaseSettings = Field(default_factory=DatabaseSettings)
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)

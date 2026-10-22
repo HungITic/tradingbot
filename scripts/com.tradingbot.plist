@@ -40,7 +40,7 @@
 
     <!-- Log files -->
     <key>StandardOutPath</key>
-    <string>/Users/itic/Documents/trading-bot/logs/bot.log</string>
+    <string>/dev/null</string>
     <key>StandardErrorPath</key>
     <string>/Users/itic/Documents/trading-bot/logs/bot_error.log</string>
 </dict>

@@ -45,7 +45,7 @@ async def acquire_application_lock():
 # Engine — single instance for the app lifetime
 engine = create_async_engine(
     settings.db.url,
-    echo=settings.debug,
+    echo=False,
     pool_size=5,
     max_overflow=10,
     pool_pre_ping=True,
