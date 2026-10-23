@@ -97,6 +97,7 @@ async def test_automatic_be_never_weakens_existing_sl(svc, side, entry, sl):
 @pytest.mark.asyncio
 async def test_tp1_uses_configured_percentage_and_respects_be_off(svc):
     tp_position(svc)
+    svc.risk_config.bad_entry_partial_close_percent = D('70')
     svc.risk_config.default_partial_close_percent = D('30')
     svc.risk_config.auto_breakeven_on_partial = False
     await svc._check_tp_milestones()
@@ -333,7 +334,8 @@ async def test_bad_entry_closes_configured_fraction_only_on_min(svc, side, min_p
     minimum, maximum = position(1, min_price, side=side), position(2, max_price, side=side)
     minimum.comment, maximum.comment = 'bot-min-entry', 'bot-max-entry'
     svc.broker.get_positions.return_value = [maximum, minimum]
-    svc.risk_config.default_partial_close_percent = D('40')
+    svc.risk_config.default_partial_close_percent = D('70')
+    svc.risk_config.bad_entry_partial_close_percent = D('40')
     svc.risk_config.auto_breakeven_on_partial = False
     parsed = SignalParser().parse('XAUUSD chốt bớt entry xấu')
     await svc.process_management_signal(parsed, 10, None, None)
@@ -347,6 +349,7 @@ async def test_explicit_bad_entry_percentage_overrides_config(svc):
     minimum.comment, maximum.comment = 'bot-override-min', 'bot-override-max'
     svc.broker.get_positions.return_value = [minimum, maximum]
     svc.risk_config.default_partial_close_percent = D('40')
+    svc.risk_config.bad_entry_partial_close_percent = D('60')
     svc.risk_config.auto_breakeven_on_partial = False
     await svc.process_management_signal(SignalParser().parse('XAUUSD chốt bớt 30% entry xấu'), 10, None, None)
     svc.broker.close_position.assert_awaited_once_with(1, D('.03'))
@@ -477,7 +480,42 @@ async def test_bad_entry_preview_without_symbol_rejects_multiple_setups(svc):
 def test_bad_entry_uses_config_even_with_custom_rule_percentage(svc):
     rule = ManagementRuleDefinition('chốt bớt entry xấu', ManagementType.PARTIAL_CLOSE, {'percentage': D('50')})
     parsed = SignalParser(rule_engine=ManagementRuleEngine([rule])).parse('XAUUSD chốt bớt entry xấu')
-    svc.risk_config.default_partial_close_percent = D('40')
+    svc.risk_config.default_partial_close_percent = D('70')
+    svc.risk_config.bad_entry_partial_close_percent = D('40')
     svc.risk_config.generic_partial_uses_default = False
     assert parsed.management_actions[0].target == 'MIN_ENTRY'
     assert svc.partial_percentage(parsed.management_actions[0]) == D('40')
+
+
+def test_generic_partial_keeps_general_ratio(svc):
+    svc.risk_config.default_partial_close_percent = D('70')
+    svc.risk_config.bad_entry_partial_close_percent = D('40')
+    action = SignalParser().parse('XAUUSD chốt bớt').management_actions[0]
+    assert svc.partial_percentage(action) == D('70')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('saved_bad_ratio,expected', [(None, 30), (40, 40)])
+async def test_seed_initializes_bad_ratio_once_without_overwriting_user_setting(saved_bad_ratio, expected):
+    from app.config.seeder import _seed_with_session, INITIAL_BOT_CONFIGS
+    from app.signal.rules import DEFAULT_RULES
+
+    session = AsyncMock()
+    session.add = MagicMock()
+    records = [SimpleNamespace(value=dict(item['value'])) for item in INITIAL_BOT_CONFIGS]
+    management = next(r for r in records if 'default_partial_close_percent' in r.value)
+    management.value['default_partial_close_percent'] = 30
+    if saved_bad_ratio is None:
+        del management.value['bad_entry_partial_close_percent']
+    else:
+        management.value['bad_entry_partial_close_percent'] = saved_bad_ratio
+    records += [SimpleNamespace(enabled=False) for _ in DEFAULT_RULES]
+    results = []
+    for record in records:
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = record
+        results.append(result)
+    session.execute.side_effect = results
+    await _seed_with_session(session)
+    assert management.value['bad_entry_partial_close_percent'] == expected
+    assert management.value['default_partial_close_percent'] == 30

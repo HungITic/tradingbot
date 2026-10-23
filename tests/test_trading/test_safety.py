@@ -264,7 +264,9 @@ async def test_config_is_atomic_and_rolls_back_after_save_failure(service):
 
 @pytest.mark.parametrize('updates', [{'require_sl': 'maybe'}, {'max_open_positions': -1},
                                       {'signal_expire_seconds': 0}, {'default_lot': 'NaN'},
-                                      {'max_daily_loss_percent': 101}, {'default_partial_close_percent': 100}])
+                                      {'max_daily_loss_percent': 101}, {'default_partial_close_percent': 100},
+                                      *({'bad_entry_partial_close_percent': value}
+                                        for value in [0, -1, 100, 101, 'NaN', 'Infinity'])])
 def test_invalid_config_values_are_rejected(updates):
     with pytest.raises(ValueError):
         RiskConfig().with_updates(updates)

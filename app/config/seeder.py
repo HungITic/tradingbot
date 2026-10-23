@@ -61,6 +61,7 @@ INITIAL_BOT_CONFIGS: list[dict[str, Any]] = [
         "key": "position_management",
         "value": {
             "default_partial_close_percent": 50.0,
+            "bad_entry_partial_close_percent": 50.0,
             "auto_breakeven_on_partial": True,
             "breakeven_offset_price": 0.0,
             "breakeven_mode": "ticket",
@@ -143,7 +144,9 @@ async def _seed_with_session(session: AsyncSession) -> dict[str, int]:
             changed = False
             for k, v in item["value"].items():
                 if k not in val:
-                    val[k] = v
+                    # Preserve the effective bad-entry ratio on first upgrade only.
+                    val[k] = (val.get("default_partial_close_percent", v)
+                              if k == "bad_entry_partial_close_percent" else v)
                     changed = True
                 elif k == "breakeven_mode" and val[k] != "ticket":
                     val[k] = "ticket"

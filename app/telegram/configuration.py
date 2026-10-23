@@ -10,6 +10,7 @@ CONFIG_FIELDS = {
     "duplicate_timeout_seconds": "Thời gian lọc trùng (giây)",
     "broker_utc_offset_hours": "Múi giờ sàn (UTC)",
     "default_lot": "Lot mặc định", "default_partial_close_percent": "Tỷ lệ chốt một phần (%)",
+    "bad_entry_partial_close_percent": "Tỷ lệ chốt bớt entry xấu (%)",
     "auto_breakeven_on_partial": "Dời SL sau khi chốt một phần",
     "generic_partial_uses_default": "Chốt bớt chung dùng tỷ lệ cấu hình",
     "require_explicit_close": "Yêu cầu từ khóa đóng lệnh rõ ràng",
@@ -24,7 +25,7 @@ CONFIG_FIELDS = {
 CONFIG_SECTIONS = {
     "entry": ("🎯 Vào lệnh", {"enabled", "enable_dual_entry", "max_slippage_entry", "lot_min_entry", "lot_max_entry", "default_lot", "min_lot", "max_lot"}),
     "sl": ("🛡 SL và hòa vốn", {"breakeven_offset_price", "breakeven_only_improve", "auto_breakeven_on_partial"}),
-    "profit": ("✂️ Chốt lời và nhánh lệnh", {"default_partial_close_percent", "tp1_enabled", "tp1_min_volume_action", "auto_cancel_pending_on_full_close", "allow_multiple_partial_closes"}),
+    "profit": ("✂️ Chốt lời và nhánh lệnh", {"default_partial_close_percent", "bad_entry_partial_close_percent", "tp1_enabled", "tp1_min_volume_action", "auto_cancel_pending_on_full_close", "allow_multiple_partial_closes"}),
     "risk": ("⚖️ Giới hạn tài khoản", {"require_sl", "require_tp", "allowed_symbols", "max_open_positions", "max_daily_loss_percent"}),
     "signal": ("📥 Xử lý tín hiệu", {"generic_partial_uses_default", "require_explicit_close", "signal_expire_seconds", "duplicate_timeout_seconds"}),
     "broker": ("🕒 Giờ sàn", {"broker_utc_offset_hours"}),
@@ -32,6 +33,7 @@ CONFIG_SECTIONS = {
 
 
 CONFIG_HELP = {
+    "bad_entry_partial_close_percent": "Chỉ áp dụng cho tin có ‘chốt bớt’ và ‘xấu’: chốt phần trăm khối lượng còn lại của Min Entry. Nhập lớn hơn 0 và nhỏ hơn 100. Phần trăm ghi rõ trong tin được ưu tiên; TP1 và chốt chung dùng tỷ lệ riêng.",
     "min_lot": "Giới hạn dưới cho mỗi lệnh. Lot mặc định và cả hai nhánh phải nằm trong khoảng min/max.",
     "max_lot": "Giới hạn trên cho mỗi lệnh, không phải tổng lot của tài khoản. Lot mặc định và cả hai nhánh phải nằm trong khoảng min/max.",
     "lot_min_entry": "Khối lượng nhánh Min Entry (đầu giá thấp của vùng entry), không phải giới hạn lot tối thiểu.",

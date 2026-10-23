@@ -198,6 +198,7 @@ def test_settings_menu_exposes_every_editable_runtime_field_once():
     ('allowed_symbols', 'XAUUSD.sc, EURUSD', ['XAUUSD.SC', 'EURUSD']),
     ('duplicate_timeout_seconds', '20', 20),
     ('broker_utc_offset_hours', '2', 2),
+    ('bad_entry_partial_close_percent', '35', D('35')),
 ])
 async def test_added_settings_input_preview_and_confirm(bot, key, value, expected):
     from unittest.mock import patch

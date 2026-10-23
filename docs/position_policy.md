@@ -29,7 +29,7 @@ Bản này thay thế các mô tả cũ về TP1, hòa vốn và chốt một ph
 ## Chốt bớt entry xấu → chỉ Min Entry
 
 - Tin có cụm **“chốt bớt” và từ “xấu”** được nhận diện là chốt một phần **Min Entry**. Ví dụ: “chốt bớt entry xấu”, “chốt bớt lệnh xấu”, “entry xấu thì chốt bớt”. Từ `XAU` (symbol vàng) không bị hiểu thành “xấu”.
-- Mặc định dùng `default_partial_close_percent`, đúng lựa chọn của người dùng. Nếu tin ghi rõ `30%` thì dùng 30%. Không đóng toàn bộ Min Entry chỉ vì có từ “xấu”; Max Entry không bị chốt.
+- Dùng tỷ lệ riêng `bad_entry_partial_close_percent`, không phụ thuộc tỷ lệ chốt chung/TP1 (`default_partial_close_percent`). Nếu tin ghi rõ `30%` thì dùng 30%. Không đóng toàn bộ Min Entry chỉ vì có từ “xấu”; Max Entry không bị chốt.
 - Ví dụ: Min Entry còn 0.10 lot, Max Entry còn 0.10 lot, tỷ lệ cấu hình 40% → chỉ chốt 0.04 lot của Min Entry, để lại 0.06 lot Min và 0.10 lot Max, tùy bước lot broker.
 - Chọn nhánh bằng nhãn đã lưu lúc đặt lệnh: `bot-min-entry`/`bot-override-min`; dùng nhãn broker khi thiếu nhãn DB. Không suy đoán Min bằng giá thấp/cao hoặc SL hiện tại. Nhãn DB và broker mâu thuẫn thì không tự chọn.
 - Reply giới hạn vào đúng kèo. Nếu không có symbol/reply, chỉ xử lý khi có duy nhất một kèo Min Entry xác định. Có nhiều kèo phù hợp thì yêu cầu reply hoặc chỉ rõ “tất cả”.
@@ -60,6 +60,7 @@ Mở `/config` và chọn mục cần đổi. Các thay đổi đều có xem tr
 | `breakeven_only_improve` | `true` | Giữ SL tự động nếu hiện tại bảo vệ tốt hơn |
 | `tp1_enabled` | `true` | Tự xử lý TP1 khi có TP2 |
 | `default_partial_close_percent` | `50` | Tỷ lệ chốt chung, TP1 và nút chốt |
+| `bad_entry_partial_close_percent` | `50` | Tỷ lệ riêng cho “chốt bớt” + “xấu”, tính trên khối lượng Min Entry còn lại; lớn hơn 0 và nhỏ hơn 100 |
 | `generic_partial_uses_default` | `true` | Câu chốt bớt chung dùng tỷ lệ cấu hình |
 | `auto_breakeven_on_partial` | `true` | Tự dời SL sau khi chốt, áp dụng cả TP1 |
 | `tp1_min_volume_action` | `breakeven` | `breakeven` hoặc `skip` |
@@ -71,6 +72,7 @@ Ví dụ command (cũng tạo bản xem trước):
 
 ```text
 /config set default_partial_close_percent 30
+/config set bad_entry_partial_close_percent 40
 /config set auto_breakeven_on_partial false
 /config set tp1_min_volume_action skip
 /config set auto_cancel_pending_on_full_close false
@@ -78,7 +80,7 @@ Ví dụ command (cũng tạo bản xem trước):
 
 Cấu hình cũ `breakeven_mode=setup` được chuyển sang `ticket` khi seed/nạp; không thể bật lại chế độ trung bình qua cài đặt.
 
-Các tham số mới được seed bổ sung vào nhóm cấu hình hiện có, không cần đổi schema. Màn hình xem trước tín hiệu hiển thị chính sách và tỷ lệ hiệu lực. Đọc cấu hình thất bại/không hợp lệ sẽ giữ bot ở trạng thái dừng mở mới.
+Các tham số mới được seed bổ sung vào nhóm cấu hình hiện có, không cần đổi schema. Khi nâng cấp, tỷ lệ entry xấu chưa tồn tại được khởi tạo bằng tỷ lệ chốt chung đang lưu để giữ hành vi hiện tại; sau đó chỉnh độc lập. Màn hình xem trước tín hiệu hiển thị chính sách và tỷ lệ hiệu lực. Đọc cấu hình thất bại/không hợp lệ sẽ giữ bot ở trạng thái dừng mở mới.
 
 ## Xác minh và kích hoạt
 

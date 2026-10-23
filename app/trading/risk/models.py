@@ -52,6 +52,7 @@ class RiskConfig(BaseModel):
 
     # Position Management Rules (Tunable via Personal Bot)
     default_partial_close_percent: Decimal = Decimal("50.0")
+    bad_entry_partial_close_percent: Decimal = Decimal("50.0")
     auto_breakeven_on_partial: bool = True
     breakeven_offset_price: Decimal = Decimal("0.0")
     allow_multiple_partial_closes: bool = False  # False = Chặn chốt từng phần lặp lại cho cùng 1 vị thế
@@ -89,6 +90,8 @@ class RiskConfig(BaseModel):
             raise ValueError("Giới hạn lỗ ngày phải lớn hơn 0 và không vượt 100%")
         if not self.default_partial_close_percent.is_finite() or not 0 < self.default_partial_close_percent < 100:
             raise ValueError("Chốt một phần phải lớn hơn 0 và nhỏ hơn 100%")
+        if not self.bad_entry_partial_close_percent.is_finite() or not 0 < self.bad_entry_partial_close_percent < 100:
+            raise ValueError("Chốt bớt entry xấu phải lớn hơn 0 và nhỏ hơn 100%")
         if not self.max_slippage_entry.is_finite() or self.max_slippage_entry < 0:
             raise ValueError("Dung sai giá phải hữu hạn và không âm")
         if not self.breakeven_offset_price.is_finite() or self.breakeven_offset_price < 0 or not -12 <= self.broker_utc_offset_hours <= 14:

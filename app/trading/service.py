@@ -1665,6 +1665,7 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
                 },
                 ("risk", "position_management"): {
                     "default_partial_close_percent": str(config.default_partial_close_percent),
+                    "bad_entry_partial_close_percent": str(config.bad_entry_partial_close_percent),
                     "auto_breakeven_on_partial": bool(config.auto_breakeven_on_partial),
                     "breakeven_mode": config.breakeven_mode,
                     "breakeven_only_improve": config.breakeven_only_improve,

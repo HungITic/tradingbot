@@ -30,7 +30,7 @@ class PositionPolicyMixin:
                 f"Tự dời SL sau chốt: {'bật' if cfg.auto_breakeven_on_partial else 'tắt'}.\n"
                 f"Thiếu lot tại TP1: {'chỉ dời SL nếu đã bật tự dời' if cfg.tp1_min_volume_action == 'breakeven' else 'bỏ qua'}.\n"
                 "Chỉ có một TP: đóng toàn bộ tại TP đó.\n"
-                "\n<b>QUẢN LÝ NHÁNH</b>\nChốt bớt + xấu: chỉ chốt Min Entry theo tỷ lệ, giữ Max Entry.\n"
+                f"\n<b>QUẢN LÝ NHÁNH</b>\nChốt bớt + xấu: chốt {cfg.bad_entry_partial_close_percent}% Min Entry, giữ Max Entry.\n"
                 f"Chốt bớt chung dùng tỷ lệ cấu hình: {'bật' if cfg.generic_partial_uses_default else 'tắt'}.\n"
                 f"Hủy Max Entry còn chờ khi Min Entry có lần chốt: {'bật' if cfg.auto_cancel_pending_on_full_close else 'tắt'}.\n"
                 f"Giữ SL đang bảo vệ tốt hơn: {'bật' if cfg.breakeven_only_improve else 'tắt'}.\n"
@@ -38,7 +38,7 @@ class PositionPolicyMixin:
 
     def partial_percentage(self, action):
         if action.target == "MIN_ENTRY" and action.percentage_source != "message":
-            return self.risk_config.default_partial_close_percent
+            return self.risk_config.bad_entry_partial_close_percent
         generic = {"chốt bớt", "chốt bớt 1 phần", "chốt 1 phần", "chốt lãi 1 phần", "chốt bớt lãi"}
         if (self.risk_config.generic_partial_uses_default and action.keyword in generic
                 and action.percentage_source != "message"):
