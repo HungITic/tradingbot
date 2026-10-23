@@ -199,6 +199,8 @@ def test_settings_menu_exposes_every_editable_runtime_field_once():
     ('duplicate_timeout_seconds', '20', 20),
     ('broker_utc_offset_hours', '2', 2),
     ('bad_entry_partial_close_percent', '35', D('35')),
+    ('bad_entry_partial_close_percent', '100', D('100')),
+    ('default_partial_close_percent', '0', D('0')),
 ])
 async def test_added_settings_input_preview_and_confirm(bot, key, value, expected):
     from unittest.mock import patch

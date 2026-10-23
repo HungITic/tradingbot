@@ -84,8 +84,8 @@ class SignalValidator:
                 return False, "Management signal detected but no actions resolved"
             for action in signal.management_actions:
                 if action.percentage is not None and action.action_type.value == "PARTIAL_CLOSE":
-                    if not action.percentage.is_finite() or not 0 < action.percentage < 100:
-                        return False, "Tỷ lệ chốt một phần phải lớn hơn 0 và nhỏ hơn 100%"
+                    if not action.percentage.is_finite() or not 0 <= action.percentage <= 100:
+                        return False, "Tỷ lệ chốt một phần phải nằm trong khoảng 0 đến 100%"
                 if action.price is not None and (not action.price.is_finite() or action.price <= 0):
                     return False, "Giá SL đích không hợp lệ"
             return True, "Valid"

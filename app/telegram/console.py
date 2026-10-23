@@ -362,7 +362,7 @@ class TelegramConsoleMixin:
             if action == "partial":
                 from decimal import Decimal
                 percentage = Decimal(data.rsplit("_", 1)[1])
-                if not percentage.is_finite() or not 0 < percentage < 100:
+                if not percentage.is_finite() or not 0 <= percentage <= 100:
                     return True
             payload = {"action": action, "tickets": tickets, "percentage": percentage}
             token = self.new_draft("action", payload)

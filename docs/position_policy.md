@@ -18,7 +18,8 @@ Bản này thay thế các mô tả cũ về TP1, hòa vốn và chốt một ph
 
 - Có TP1 và TP2: TP2 là TP cuối gắn trên MT5. Khi TP1 được chạm, bot chốt theo `default_partial_close_percent`, rồi dời SL nếu bật `auto_breakeven_on_partial`.
 - Chỉ có một TP: đóng toàn bộ tại TP đó. Bot không đồng thời chạy chốt một phần để cạnh tranh với TP trên MT5.
-- Chốt một phần luôn dùng `volume_min` và `volume_step` của broker, làm tròn xuống. Không đủ khối lượng hoặc phần dư nhỏ hơn lot tối thiểu thì không tự đóng hết vị thế.
+- Tỷ lệ chốt nhận từ 0 đến 100%: 0 bỏ qua chốt (với TP1 cũng không tự dời SL), 100 yêu cầu đóng hết khối lượng trong phạm vi đã chọn và không tự dời SL sau đó. Mức 100 vẫn được thực hiện khi đã chốt một phần trước đó.
+- Với tỷ lệ lớn hơn 0 và nhỏ hơn 100, chốt một phần dùng `volume_min` và `volume_step` của broker, làm tròn xuống. Không đủ khối lượng hoặc phần dư nhỏ hơn lot tối thiểu thì không tự đóng hết vị thế.
 - Khi TP1 thiếu lot, có hai lựa chọn: bỏ qua hoặc chỉ dời SL nếu đã bật tự dời. Tắt tự dời SL thì TP1 cũng không tự dời.
 - Chốt TP1 thất bại: không dời SL, không đánh dấu đã xử lý thành công.
 - Chốt thành công nhưng dời SL thất bại: không chốt lại; chỉ thử lại bước dời SL ở lần kiểm tra đủ điều kiện kế tiếp.
@@ -29,7 +30,7 @@ Bản này thay thế các mô tả cũ về TP1, hòa vốn và chốt một ph
 ## Chốt bớt entry xấu → chỉ Min Entry
 
 - Tin có cụm **“chốt bớt” và từ “xấu”** được nhận diện là chốt một phần **Min Entry**. Ví dụ: “chốt bớt entry xấu”, “chốt bớt lệnh xấu”, “entry xấu thì chốt bớt”. Từ `XAU` (symbol vàng) không bị hiểu thành “xấu”.
-- Dùng tỷ lệ riêng `bad_entry_partial_close_percent`, không phụ thuộc tỷ lệ chốt chung/TP1 (`default_partial_close_percent`). Nếu tin ghi rõ `30%` thì dùng 30%. Không đóng toàn bộ Min Entry chỉ vì có từ “xấu”; Max Entry không bị chốt.
+- Dùng tỷ lệ riêng `bad_entry_partial_close_percent`, không phụ thuộc tỷ lệ chốt chung/TP1 (`default_partial_close_percent`). Nếu tin ghi rõ `30%` thì dùng 30%. Mức 0 bỏ qua chốt, mức 100 đóng hết Min Entry; Max Entry đã khớp không bị chốt.
 - Ví dụ: Min Entry còn 0.10 lot, Max Entry còn 0.10 lot, tỷ lệ cấu hình 40% → chỉ chốt 0.04 lot của Min Entry, để lại 0.06 lot Min và 0.10 lot Max, tùy bước lot broker.
 - Chọn nhánh bằng nhãn đã lưu lúc đặt lệnh: `bot-min-entry`/`bot-override-min`; dùng nhãn broker khi thiếu nhãn DB. Không suy đoán Min bằng giá thấp/cao hoặc SL hiện tại. Nhãn DB và broker mâu thuẫn thì không tự chọn.
 - Reply giới hạn vào đúng kèo. Nếu không có symbol/reply, chỉ xử lý khi có duy nhất một kèo Min Entry xác định. Có nhiều kèo phù hợp thì yêu cầu reply hoặc chỉ rõ “tất cả”.
@@ -60,7 +61,7 @@ Mở `/config` và chọn mục cần đổi. Các thay đổi đều có xem tr
 | `breakeven_only_improve` | `true` | Giữ SL tự động nếu hiện tại bảo vệ tốt hơn |
 | `tp1_enabled` | `true` | Tự xử lý TP1 khi có TP2 |
 | `default_partial_close_percent` | `50` | Tỷ lệ chốt chung, TP1 và nút chốt |
-| `bad_entry_partial_close_percent` | `50` | Tỷ lệ riêng cho “chốt bớt” + “xấu”, tính trên khối lượng Min Entry còn lại; lớn hơn 0 và nhỏ hơn 100 |
+| `bad_entry_partial_close_percent` | `50` | Tỷ lệ riêng cho “chốt bớt” + “xấu”, tính trên khối lượng Min Entry còn lại; từ 0 đến 100 |
 | `generic_partial_uses_default` | `true` | Câu chốt bớt chung dùng tỷ lệ cấu hình |
 | `auto_breakeven_on_partial` | `true` | Tự dời SL sau khi chốt, áp dụng cả TP1 |
 | `tp1_min_volume_action` | `breakeven` | `breakeven` hoặc `skip` |

@@ -495,6 +495,58 @@ def test_generic_partial_keeps_general_ratio(svc):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('ratio', ['0', '100'])
+@pytest.mark.parametrize('explicit', [False, True])
+async def test_bad_entry_boundary_percentage(svc, ratio, explicit):
+    minimum, maximum = position(1, volume='.01'), position(2)
+    minimum.comment, maximum.comment = 'bot-min-entry', 'bot-max-entry'
+    svc.broker.get_positions.return_value = [minimum, maximum]
+    svc.risk_config = svc.risk_config.with_updates({'bad_entry_partial_close_percent': ratio})
+    svc.cancel_dual_entry_pending_orders_on_close = AsyncMock()
+    # A full exit is allowed even after an earlier partial close.
+    svc.management_history.return_value = ({1}, set())
+    text = 'XAUUSD chốt bớt entry xấu' + (f' {ratio}%' if explicit else '')
+    parsed = SignalParser().parse(text)
+    from app.signal.validator import SignalValidator
+    assert SignalValidator().validate_signal(parsed)[0]
+    await svc.process_management_signal(parsed, 10, None, None)
+    if ratio == '100':
+        svc.broker.close_position.assert_awaited_once_with(1, D('.01'))
+        svc.cancel_dual_entry_pending_orders_on_close.assert_awaited_once()
+    else:
+        svc.broker.close_position.assert_not_awaited()
+        svc.cancel_dual_entry_pending_orders_on_close.assert_not_awaited()
+    svc.broker.modify_position.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('ratio', ['0', '100'])
+async def test_manual_boundary_percentage_never_moves_sl(svc, ratio):
+    svc.broker.get_positions.return_value = [position(1)]
+    svc.cancel_dual_entry_pending_orders_on_close = AsyncMock()
+    await svc.partial_close_positions(percentage=D(ratio), ticket=1)
+    if ratio == '100':
+        svc.broker.close_position.assert_awaited_once_with(1, D('.10'))
+    else:
+        svc.broker.close_position.assert_not_awaited()
+    svc.broker.modify_position.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('ratio', ['0', '100'])
+async def test_tp1_boundary_percentage_never_moves_sl(svc, ratio):
+    tp_position(svc)
+    svc.risk_config = svc.risk_config.with_updates({'default_partial_close_percent': ratio})
+    svc.cancel_dual_entry_pending_orders_on_close = AsyncMock()
+    await svc.check_tp_milestones()
+    if ratio == '100':
+        svc.broker.close_position.assert_awaited_once_with(1, D('.10'))
+    else:
+        svc.broker.close_position.assert_not_awaited()
+    svc.broker.modify_position.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('saved_bad_ratio,expected', [(None, 30), (40, 40)])
 async def test_seed_initializes_bad_ratio_once_without_overwriting_user_setting(saved_bad_ratio, expected):
     from app.config.seeder import _seed_with_session, INITIAL_BOT_CONFIGS

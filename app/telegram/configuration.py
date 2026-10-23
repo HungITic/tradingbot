@@ -33,7 +33,7 @@ CONFIG_SECTIONS = {
 
 
 CONFIG_HELP = {
-    "bad_entry_partial_close_percent": "Chỉ áp dụng cho tin có ‘chốt bớt’ và ‘xấu’: chốt phần trăm khối lượng còn lại của Min Entry. Nhập lớn hơn 0 và nhỏ hơn 100. Phần trăm ghi rõ trong tin được ưu tiên; TP1 và chốt chung dùng tỷ lệ riêng.",
+    "bad_entry_partial_close_percent": "Chỉ áp dụng cho tin có ‘chốt bớt’ và ‘xấu’: chốt phần trăm khối lượng còn lại của Min Entry. Nhập từ 0 đến 100: 0 bỏ qua chốt, 100 đóng hết Min Entry. Phần trăm ghi rõ trong tin được ưu tiên; TP1 và chốt chung dùng tỷ lệ riêng.",
     "min_lot": "Giới hạn dưới cho mỗi lệnh. Lot mặc định và cả hai nhánh phải nằm trong khoảng min/max.",
     "max_lot": "Giới hạn trên cho mỗi lệnh, không phải tổng lot của tài khoản. Lot mặc định và cả hai nhánh phải nằm trong khoảng min/max.",
     "lot_min_entry": "Khối lượng nhánh Min Entry (đầu giá thấp của vùng entry), không phải giới hạn lot tối thiểu.",

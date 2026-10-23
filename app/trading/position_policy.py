@@ -135,8 +135,12 @@ class PositionPolicyMixin:
 
     async def partial_volume(self, pos: PositionInfo, percentage: Decimal) -> Decimal:
         pct = Decimal(str(percentage))
-        if not pct.is_finite() or not 0 < pct < 100:
-            raise ValueError("Tỷ lệ chốt một phần phải lớn hơn 0 và nhỏ hơn 100%")
+        if not pct.is_finite() or not 0 <= pct <= 100:
+            raise ValueError("Tỷ lệ chốt một phần phải nằm trong khoảng 0 đến 100%")
+        if pct == 0:
+            return Decimal("0")
+        if pct == 100:
+            return pos.volume
         spec = await self.broker.get_symbol_info(pos.symbol)
         step, minimum = spec.volume_step, spec.volume_min
         if step <= 0 or minimum <= 0:
@@ -151,6 +155,8 @@ class PositionPolicyMixin:
             volume = await self.partial_volume(pos, percentage)
         except Exception as exc:
             return OrderResult(False, ticket=pos.ticket, comment=str(exc), raw={"not_divisible": isinstance(exc, PartialVolumeTooSmall)}), Decimal("0")
+        if volume == 0:
+            return OrderResult(False, ticket=pos.ticket, comment="Bỏ qua chốt vì tỷ lệ là 0%", raw={"skipped": True}), volume
         result = await self.broker.close_position(pos.ticket, volume)
         if result.success:
             await self.cancel_dual_entry_pending_orders_on_close(pos.ticket, reason="Min Entry đã chốt một phần")
@@ -184,7 +190,7 @@ class PositionPolicyMixin:
                 cause = "MIN_ENTRY_PARTIAL"
             if cause not in {"TP1_PARTIAL", "FINAL_TP", "MANUAL_PARTIAL", "MANUAL_CLOSE", "CLOSE_ALL", "KILL_SWITCH", "MIN_ENTRY_PARTIAL"}:
                 cause = "SIGNAL_PARTIAL" if action == "PARTIAL_CLOSE" else "SIGNAL_CLOSE"
-            partial = (action == "PARTIAL_CLOSE" or result.retcode == 10010
+            partial = ((action == "PARTIAL_CLOSE" and Decimal(parameters.get("volume", "0")) < pos.volume) or result.retcode == 10010
                        or (result.volume is not None and 0 < result.volume < pos.volume))
             metadata = self.close_execution_metadata(pos.ticket, result, cause, partial=partial)
         await self._insert_management_action(signal_id, pos.ticket, action, parameters,
@@ -213,7 +219,7 @@ class PositionPolicyMixin:
             order = orders.get(pos.ticket)
             already = pos.ticket in history or pos.ticket in self._tp1_processed_tickets
             already |= bool(order and order.volume is not None and pos.volume < order.volume)
-            if already and not self.risk_config.allow_multiple_partial_closes:
+            if already and Decimal(str(percentage)) not in {0, 100} and not self.risk_config.allow_multiple_partial_closes:
                 result, volume = OrderResult(False, ticket=pos.ticket, comment="Vị thế đã chốt một phần; đã chặn chốt lặp"), Decimal("0")
             else:
                 result, volume = await self.partial_one(pos, percentage)
@@ -222,7 +228,7 @@ class PositionPolicyMixin:
                     group = groups.get(pos.ticket)
                     await self.record_management(group if isinstance(group, int) else None,
                                                  pos, "PARTIAL_CLOSE", result, volume=str(volume), reason="MANUAL_PARTIAL")
-                    if self.risk_config.auto_breakeven_on_partial:
+                    if self.risk_config.auto_breakeven_on_partial and volume < pos.volume:
                         be = await self.apply_stop(pos, self.breakeven_target(pos, all_positions, groups))
                         await self.record_management(None, pos, "AUTO_BREAKEVEN", be, reason="MANUAL_PARTIAL", sl=str(be.price))
                         result.comment += (f" · SL: {be.price} ({be.comment})" if be.success
@@ -258,6 +264,8 @@ class PositionPolicyMixin:
                 continue
             if not self.risk_config.tp1_enabled or order.tp2 is None or not reached(order.tp1):
                 continue
+            if self.risk_config.default_partial_close_percent == 0:
+                continue
             if pos.ticket in completed or pos.ticket in self._tp1_completed_tickets:
                 continue
             already_partial = (pos.ticket in previous_partial or pos.ticket in self._tp1_processed_tickets
@@ -270,6 +278,9 @@ class PositionPolicyMixin:
                     await self.record_management(order.signal_id, pos, "PARTIAL_CLOSE", result,
                                                  reason="TP1_PARTIAL", volume=str(volume))
                     await self.notify(f"✅ TP1 #{pos.ticket}: đã chốt {volume} lot ({self.risk_config.default_partial_close_percent}% yêu cầu)")
+                    if volume == pos.volume:
+                        self._tp1_completed_tickets.add(pos.ticket)
+                        continue
                 elif not result.raw.get("not_divisible"):
                     await self.record_management(order.signal_id, pos, "PARTIAL_CLOSE", result, reason="TP1_PARTIAL")
                     await self.notify(f"❌ TP1 #{pos.ticket}: {escape(result.comment)}")
@@ -368,6 +379,7 @@ class PositionPolicyMixin:
             return
         partial_history, _ = await self.management_history(positions)
         outcomes = []
+        closed_tickets = set()
         has_stop = any(a.action_type in {ManagementType.MOVE_SL, ManagementType.BREAKEVEN} for a in signal.management_actions)
         for action, selected in zip(signal.management_actions, selections):
             if action.action_type == ManagementType.CLOSE:
@@ -377,13 +389,18 @@ class PositionPolicyMixin:
                         outcomes.append(result.success)
                 pending = [o for o in pending if action.side is not None and not o.order_type.startswith(action.side.value)]
             for pos in selected:
+                if pos.ticket in closed_tickets:
+                    continue
                 if action.action_type in {ManagementType.CLOSE, ManagementType.PARTIAL_CLOSE}:
                     partial = action.action_type == ManagementType.PARTIAL_CLOSE
                     percentage = self.partial_percentage(action)
+                    if partial and percentage == 0:
+                        await self.notify(f"ℹ️ {reply_tag} · Bỏ qua chốt vì tỷ lệ là 0%.")
+                        continue
                     db_order = orders.get(pos.ticket)
                     already = pos.ticket in partial_history or pos.ticket in self._tp1_processed_tickets
                     already |= bool(db_order and db_order.volume is not None and pos.volume < db_order.volume)
-                    if partial and already and not self.risk_config.allow_multiple_partial_closes:
+                    if partial and percentage < 100 and already and not self.risk_config.allow_multiple_partial_closes:
                         await self.notify(f"ℹ️ {reply_tag} · Bỏ qua chốt bớt #{pos.ticket}: Vị thế đã chốt 1 phần trước đó.")
                         continue
                     if partial:
@@ -392,6 +409,8 @@ class PositionPolicyMixin:
                         volume = pos.volume
                         result = await self.broker.close_position(pos.ticket, volume)
                     outcomes.append(result.success)
+                    if result.success and volume == pos.volume and result.retcode != 10010:
+                        closed_tickets.add(pos.ticket)
                     await self.record_management(signal_id, pos, action.action_type.value, result, volume=str(volume), target=action.target)
                     label = f"Chốt {percentage.normalize():f}%" if partial else "Đóng lệnh"
                     if action.target == "MIN_ENTRY":
@@ -400,7 +419,7 @@ class PositionPolicyMixin:
                     if result.success and partial:
                         self._tp1_processed_tickets.add(pos.ticket)
                         partial_history.add(pos.ticket)
-                        if self.risk_config.auto_breakeven_on_partial and not has_stop:
+                        if self.risk_config.auto_breakeven_on_partial and not has_stop and volume < pos.volume:
                             be = await self.apply_stop(pos, self.breakeven_target(pos, positions, groups))
                             outcomes.append(be.success)
                             await self.record_management(signal_id, pos, "AUTO_BREAKEVEN", be, sl=str(be.price))
