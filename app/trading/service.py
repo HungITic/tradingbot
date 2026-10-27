@@ -44,9 +44,10 @@ from app.trading.safety import TradingSafetyMixin
 from app.telegram.presentation import execution_card
 from app.trading.position_policy import PositionPolicyMixin
 from app.trading.close_reporting import CloseReportingMixin
+from app.trading.native_tp import NativeTPMixin, branch_comment, native_comment
 
 
-class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixin):
+class TradingService(NativeTPMixin, CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixin):
     """Core trade coordinator and order router."""
 
     def __init__(
@@ -101,6 +102,7 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
         self._ticket_to_signal_db_id: dict[int, int] = {}
         self._ticket_to_msg_id: dict[int, int] = {}
         self._ticket_to_symbol: dict[int, str] = {}
+        self._ticket_to_entry_comment: dict[int, str] = {}
         self._cancelled_dual_entry_tickets: set[int] = set()
         self._position_opening_orders: dict[int, int] = {}
         self._position_entry_deals: dict[int, dict[int, DealInfo]] = {}
@@ -354,7 +356,7 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
             reqs = entry["orders"]
             targets = list(reqs) if target == "both" else [target]
             selected = [reqs[t] for t in targets if t in reqs]
-            context.planned_order_count = len(selected)
+            context.planned_order_count = sum(self.native_leg_count(req.tp1, req.tp2) for req in selected)
             # Only the explicitly presented rejection may be bypassed. All other rules remain active.
             allowed = entry.get("allowed_rule")
             for rule in self.risk_engine.rules:
@@ -374,6 +376,7 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
                     problem = self.check_request(req)
                     if problem:
                         return f"⛔ {escape(problem)}"
+                    await self.prepare_native_orders(req)
                     prepared.append(req)
                 except Exception as exc:
                     return f"⛔ Không thể kiểm tra giá: {escape(str(exc))}"
@@ -381,11 +384,13 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
             self._pending_overrides.pop(signal_db_id, None)
             messages = []
             successes = 0
+            partial_branch = False
             for req in prepared:
                 if not self.risk_config.enabled:
                     messages.append("⛔ Bot đã tạm dừng; không gửi thêm lệnh.")
                     break
-                result = await self.broker.open_order(req)
+                result = await self.open_entry_branch(req)
+                partial_branch |= bool(result.raw.get('partial_branch'))
                 if result.raw.get("uncertain"):
                     self.risk_config.enabled = False
                     messages.append("⛔ Kết quả MT5 chưa xác định; đã dừng các nhánh tiếp theo để đối soát.")
@@ -399,7 +404,7 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
                 else:
                     messages.append(f"❌ {escape(result.comment)} (mã {result.retcode})")
             await self.set_signal_status(entry.get("db_id"),
-                "EXECUTED" if successes == len(prepared) else ("PARTIAL" if successes else "ERROR"))
+                "EXECUTED" if successes == len(prepared) else ("PARTIAL" if successes or partial_branch else "ERROR"))
             if successes:
                 self._recent_signals.append({"symbol": signal.symbol, "action": signal.new_order.action.value,
                                              "timestamp": time.time()})
@@ -416,6 +421,11 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
     ) -> None:
         """Persist executed or placed order into PostgreSQL audit trail."""
         if not result.success or not result.ticket:
+            return
+        if 'native_children' in result.raw:
+            for child_req, child_result in result.raw['native_children']:
+                await self._record_db_order(signal_db_id, child_result, child_req, status,
+                                           message_link, telegram_message_id)
             return
 
         try:
@@ -445,6 +455,7 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
             raise
 
         ticket = result.ticket
+        self._ticket_to_entry_comment[ticket] = order_req.comment
         if message_link:
             self._order_message_links[ticket] = message_link
 
@@ -515,12 +526,22 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
 
         if not all_pending:
             return []
+        if any(native_comment(po.comment) for po in all_pending if po.ticket in sibling_tickets):
+            comment = self._ticket_to_entry_comment.get(closed_ticket)
+            if comment is None:
+                from sqlalchemy import select
+                from app.config.database import get_session
+                from app.models.trade import Order
+                async with get_session() as session:
+                    comment = await session.scalar(select(Order.comment).where(Order.mt5_ticket == closed_ticket))
+            if not isinstance(comment, str) or branch_comment(comment) not in {'bot-min-entry', 'bot-override-min'}:
+                return []
 
         # Find matching pending orders to cancel
         pending_to_cancel = [
             po for po in all_pending
             if po.ticket in sibling_tickets and po.ticket not in self._cancelled_dual_entry_tickets
-            and getattr(po, "comment", "") in {"bot-max-entry", "bot-override-max"}
+            and branch_comment(getattr(po, "comment", "")) in {"bot-max-entry", "bot-override-max"}
         ]
 
         if not pending_to_cancel:
@@ -595,7 +616,7 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
         cancelled_tickets: list[int] = []
 
         for po in pending_orders:
-            if getattr(po, "comment", "") not in {"bot-max-entry", "bot-override-max"}:
+            if branch_comment(getattr(po, "comment", "")) not in {"bot-max-entry", "bot-override-max"}:
                 continue
             if po.ticket in self._cancelled_dual_entry_tickets:
                 continue
@@ -902,7 +923,14 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
                     signal_id=signal_db_id,
                 )
 
-            context.planned_order_count = 2 if has_dual_entry else 1
+            try:
+                for request in pending_reqs.values():
+                    await self.prepare_native_orders(request)
+            except Exception as exc:
+                await self.set_signal_status(signal_db_id, "REJECTED", str(exc))
+                await self.notify(self.format_notification(f"⛔ {escape(str(exc))}", message_link))
+                return
+            context.planned_order_count = (2 if has_dual_entry else 1) * self.native_leg_count(signal.new_order.take_profit, signal.new_order.take_profit_2)
             override_data = {"signal": signal, "signal_time": signal_time, "db_id": signal_db_id,
                              "message_id": message_id, "allowed_rule": None}
             decision = self.risk_engine.evaluate(signal, context)
@@ -1035,8 +1063,9 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
                 return
             if not self.risk_config.enabled:
                 return
-            result_1 = await self.broker.open_order(order_req_1)
-            await self.set_signal_status(signal_db_id, "EXECUTED" if result_1.success else "ERROR", result_1.comment)
+            result_1 = await self.open_entry_branch(order_req_1)
+            await self.set_signal_status(signal_db_id, "EXECUTED" if result_1.success else
+                                         "PARTIAL" if result_1.raw.get('partial_branch') else "ERROR", result_1.comment)
             if result_1.raw.get("uncertain"):
                 self.risk_config.enabled = False
                 await self.notify("⛔ Chưa xác định kết quả MT5; đã tạm dừng để đối soát, không gửi nhánh tiếp theo.")
@@ -1102,7 +1131,7 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
                         await self.set_signal_status(signal_db_id, "PARTIAL", problem)
                         await self.notify(f"⛔ Nhánh thứ hai chưa được đặt: {escape(problem)}")
                         return
-                    result_2 = await self.broker.open_order(order_req_2)
+                    result_2 = await self.open_entry_branch(order_req_2)
                     if not result_2.success:
                         await self.set_signal_status(signal_db_id, "PARTIAL", result_2.comment)
 
@@ -1153,6 +1182,13 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
         self, ticket: int, volume: Decimal | None = None
     ) -> OrderResult:
         """Close an individual position."""
+        grouped = await self.get_open_positions()
+        target = next((p for p in grouped if p.ticket == ticket or any(c.ticket == ticket for c in p.members)), None)
+        if target and target.members:
+            percentage = Decimal('100') if volume is None else volume / target.volume * 100
+            res, closed = await self.close_native_fraction(target, percentage)
+            await self.record_management(None, target, 'CLOSE', res, reason='MANUAL_CLOSE', volume=str(closed))
+            return res
         res = await self.broker.close_position(ticket, volume)
         metadata = self.close_execution_metadata(ticket, res, "MANUAL_CLOSE", partial=volume is not None or res.retcode == 10010)
         await self._insert_management_action(None, ticket, "CLOSE", {"reason": "MANUAL_CLOSE"},
@@ -1180,6 +1216,12 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
         tp: Decimal | None = None,
     ) -> OrderResult:
         """Modify SL/TP on an active position."""
+        positions = await self.get_open_positions()
+        target = next((p for p in positions if p.ticket == ticket or any(c.ticket == ticket for c in p.members)), None)
+        if target and target.members:
+            results = [await self.broker.modify_position(p.ticket, sl, tp) for p in target.members]
+            return OrderResult(all(r.success for r in results), ticket=ticket,
+                               comment=' · '.join(r.comment for r in results))
         return await self.broker.modify_position(ticket, sl, tp)
 
     async def get_closed_deals(
@@ -1270,6 +1312,7 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
             positions_available = True
         except Exception as e:
             logger.warning("get_closed_positions_active_failed", error=str(e))
+            active_positions = []
             active_tickets = set()
             active_pos_map = {}
             positions_available = False
@@ -1484,6 +1527,10 @@ class TradingService(CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixi
             for item in aggregated
         ]
 
+        try:
+            result = await self.group_native_history(result, active_positions, positions_available)
+        except Exception as exc:
+            logger.error('native_history_grouping_failed', error=str(exc))
         result.sort(key=lambda p: p.close_time, reverse=True)
         if limit is not None and limit > 0:
             return result[:limit]

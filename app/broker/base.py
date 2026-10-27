@@ -104,6 +104,8 @@ class PositionInfo:
     magic: int = 0
     comment: str = ""
     identifier: int = 0  # Stable POSITION_IDENTIFIER, which can differ from ticket.
+    members: tuple[PositionInfo, ...] = ()  # Logical entry branch; broker objects stay individual.
+    initial_volume: Decimal | None = None
 
 
 @dataclass

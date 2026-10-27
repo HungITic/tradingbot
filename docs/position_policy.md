@@ -16,7 +16,12 @@ Bản này thay thế các mô tả cũ về TP1, hòa vốn và chốt một ph
 
 ## TP và chốt một phần
 
-- Có TP1 và TP2: TP2 là TP cuối gắn trên MT5. Khi TP1 được chạm, bot chốt theo `default_partial_close_percent`, rồi dời SL nếu bật `auto_breakeven_on_partial`.
+- **Lệnh mới có TP1 và TP2, tài khoản hedging:** mỗi nhánh entry được chia theo `default_partial_close_percent` lúc mở. Ví dụ 1.5 lot và 30% → 0.45 lot gắn TP1, 1.05 lot gắn TP2, cùng SL. Cả nhánh market và nhánh pending đều dùng TP trực tiếp phía broker. Hai phần là hai vị thế MT5 nhưng được gom thành một nhánh trong phần vị thế và lịch sử Telegram.
+- Bot xác nhận `margin_mode=2` từ MT5. Tỷ lệ 0% hoặc tắt TP1 → chỉ mở phần TP2; 100% → chỉ mở phần TP1. Hai phần phải hợp lệ theo lot tối thiểu/bước lot của broker; không đủ lot thì từ chối mở nhánh, không âm thầm đổi tỷ lệ. Lot phần TP1 làm tròn xuống, phần TP2 giữ số dư để không tăng tổng lot.
+- Tỷ lệ được cố định trong khối lượng vị thế lúc mở. Đổi cấu hình không chia lại vị thế đang mở. Giới hạn số vị thế/lệnh chờ tính cả các phần TP: hai nhánh entry, mỗi nhánh hai TP tương ứng tối đa bốn lệnh MT5.
+- Hai phần được gửi tuần tự, nên giá khớp market có thể khác nhau. Giao diện nhánh hiển thị entry bình quân theo lot; khi dời hòa vốn, mỗi phần dùng entry thực tế riêng của nó.
+- TP chạy phía broker khi bot offline. Sau khi xác nhận deal thoát phần TP1 có lý do TP, bot dời SL phần TP2 về entry riêng nếu bật `auto_breakeven_on_partial`. Dời SL vẫn cần bot hoạt động/kết nối; thất bại sẽ được thử lại. Không suy ra TP1 chỉ từ việc vị thế biến mất hoặc giá đã vượt TP1. Hoàn tất dời SL được lưu để khôi phục sau restart.
+- **Lệnh cũ chưa tách:** tiếp tục dùng cơ chế kiểm tra giá TP1 và chốt một phần trước đây; không tự đóng/mở lại các vị thế cũ. Chính sách `tp1_min_volume_action` chỉ dùng cho cơ chế cũ.
 - Chỉ có một TP: đóng toàn bộ tại TP đó. Bot không đồng thời chạy chốt một phần để cạnh tranh với TP trên MT5.
 - Tỷ lệ chốt nhận từ 0 đến 100%: 0 bỏ qua chốt (với TP1 cũng không tự dời SL), 100 yêu cầu đóng hết khối lượng trong phạm vi đã chọn và không tự dời SL sau đó. Mức 100 vẫn được thực hiện khi đã chốt một phần trước đó.
 - Với tỷ lệ lớn hơn 0 và nhỏ hơn 100, chốt một phần dùng `volume_min` và `volume_step` của broker, làm tròn xuống. Không đủ khối lượng hoặc phần dư nhỏ hơn lot tối thiểu thì không tự đóng hết vị thế.
@@ -32,6 +37,7 @@ Bản này thay thế các mô tả cũ về TP1, hòa vốn và chốt một ph
 - Tin có cụm **“chốt bớt” và từ “xấu”** được nhận diện là chốt một phần **Min Entry**. Ví dụ: “chốt bớt entry xấu”, “chốt bớt lệnh xấu”, “entry xấu thì chốt bớt”. Từ `XAU` (symbol vàng) không bị hiểu thành “xấu”.
 - Dùng tỷ lệ riêng `bad_entry_partial_close_percent`, không phụ thuộc tỷ lệ chốt chung/TP1 (`default_partial_close_percent`). Nếu tin ghi rõ `30%` thì dùng 30%. Mức 0 bỏ qua chốt, mức 100 đóng hết Min Entry; Max Entry đã khớp không bị chốt.
 - Ví dụ: Min Entry còn 0.10 lot, Max Entry còn 0.10 lot, tỷ lệ cấu hình 40% → chỉ chốt 0.04 lot của Min Entry, để lại 0.06 lot Min và 0.10 lot Max, tùy bước lot broker.
+- Nếu Min Entry đã tách TP1/TP2, phần trăm chốt tính trên tổng khối lượng còn lại của nhánh một lần, không làm tròn độc lập từng vị thế con. Bot ưu tiên giảm phần TP1 rồi phần TP2, giữ đúng tổng lot cần đóng; không chia được theo bước lot thì từ chối. Mức 100% đóng tất cả vị thế con của Min Entry. Chặn chốt lặp vẫn áp dụng sau khi một phần đã đóng, kể cả sau restart; bật `allow_multiple_partial_closes` để chốt tiếp theo tỷ lệ dưới 100%.
 - Chọn nhánh bằng nhãn đã lưu lúc đặt lệnh: `bot-min-entry`/`bot-override-min`; dùng nhãn broker khi thiếu nhãn DB. Không suy đoán Min bằng giá thấp/cao hoặc SL hiện tại. Nhãn DB và broker mâu thuẫn thì không tự chọn.
 - Reply giới hạn vào đúng kèo. Nếu không có symbol/reply, chỉ xử lý khi có duy nhất một kèo Min Entry xác định. Có nhiều kèo phù hợp thì yêu cầu reply hoặc chỉ rõ “tất cả”.
 - Không có Min Entry đang mở, nhãn không đủ rõ hoặc lot không đủ chia: không chuyển sang chốt Max Entry hoặc đóng hết lệnh tối thiểu.
@@ -82,6 +88,8 @@ Ví dụ command (cũng tạo bản xem trước):
 Cấu hình cũ `breakeven_mode=setup` được chuyển sang `ticket` khi seed/nạp; không thể bật lại chế độ trung bình qua cài đặt.
 
 Các tham số mới được seed bổ sung vào nhóm cấu hình hiện có, không cần đổi schema. Khi nâng cấp, tỷ lệ entry xấu chưa tồn tại được khởi tạo bằng tỷ lệ chốt chung đang lưu để giữ hành vi hiện tại; sau đó chỉnh độc lập. Màn hình xem trước tín hiệu hiển thị chính sách và tỷ lệ hiệu lực. Đọc cấu hình thất bại/không hợp lệ sẽ giữ bot ở trạng thái dừng mở mới.
+
+Liên kết phần TP dùng signal FK và nhãn nhánh/TP trong `orders.comment`, được commit cùng kết quả broker bởi command journal. Không cần migration schema mới. Trước khi gửi hai phần, cấu hình mở mới trong DB được tạm khóa; chỉ khôi phục sau khi cả hai phần đã xác nhận. Nếu tiến trình chết giữa hai lần gửi, restart giữ trạng thái dừng mở mới để đối soát. Nếu khớp thiếu, bị từ chối hoặc không rõ kết quả, bot không tự gửi bù/đóng ngược để giả lập rollback. Hai lệnh MT5 không thể là một giao dịch nguyên tử với PostgreSQL; các phần đã khớp vẫn giữ SL/TP riêng.
 
 ## Xác minh và kích hoạt
 

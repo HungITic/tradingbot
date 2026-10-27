@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.broker.base import AccountInfo, DealInfo, OrderRequest, OrderResult, TickInfo
+from app.broker.base import AccountInfo, DealInfo, OrderRequest, OrderResult, TickInfo, SymbolInfo
 from app.core.timezone import now_vietnam
 from app.signal.models import MessageType
 from app.signal.parser import SignalParser
@@ -20,7 +20,7 @@ SIGNAL = "BUY XAUUSD 2650\nSL: 2640\nTP1: 2670\nTP2: 2680"
 @pytest.fixture
 def service():
     broker = AsyncMock()
-    broker.get_account_info.return_value = AccountInfo(1, D('900'), D('900'), D('0'), D('900'), 100, 'Demo', 'USD')
+    broker.get_account_info.return_value = AccountInfo(1, D('900'), D('900'), D('0'), D('900'), 100, 'Demo', 'USD', raw={'margin_mode': 2})
     broker.get_positions.return_value = []
     broker.get_pending_orders.return_value = []
     broker.get_history_deals.return_value = []
@@ -29,6 +29,7 @@ def service():
     broker.open_order.return_value = OrderResult(True, ticket=1)
     broker.close_position.return_value = OrderResult(True, ticket=1)
     broker.cancel_order.return_value = OrderResult(True, ticket=2)
+    broker.get_symbol_info.return_value = SymbolInfo('XAUUSD', 2, D('.01'), D('.001'), D('100'), D('.001'), D('100'))
     svc = TradingService(broker=broker, risk_config=RiskConfig())
     svc.notify = AsyncMock()
     svc.set_signal_status = AsyncMock()
@@ -45,6 +46,8 @@ def database():
     result.scalar_one_or_none.return_value = 1
     session.execute.return_value = result
     session.scalar.return_value = 1
+    session.scalars.return_value = MagicMock()
+    session.scalars.return_value.all.return_value = []
 
     @asynccontextmanager
     async def db():
@@ -77,13 +80,14 @@ async def test_new_order_levels_shift_in_preview_execution_and_audit(service, da
     service.broker.open_order.assert_not_awaited()
 
     await service.process_raw_message(raw)
-    assert service.broker.open_order.await_count == 2
-    market, pending = [call.args[0] for call in service.broker.open_order.call_args_list]
-    assert market.price == quote and pending.price == second
-    for req in (market, pending):
+    assert service.broker.open_order.await_count == 4
+    market1, market2, pending1, pending2 = [call.args[0] for call in service.broker.open_order.call_args_list]
+    assert market1.price == market2.price == quote and pending1.price == pending2.price == second
+    for req in (market1, market2, pending1, pending2):
         assert req.sl == D(sl) + D(offset)
         assert req.tp1 == D(tp1) + D(offset)
-        assert req.tp2 == req.tp == D(tp2) + D(offset)
+        assert req.tp2 == D(tp2) + D(offset)
+        assert req.tp == (req.tp1 if req.comment.endswith(':tp1') else req.tp2)
     from app.models.signal import ParsedSignal as DBParsedSignal
     audit = next(call.args[0] for call in database.add.call_args_list
                  if isinstance(call.args[0], DBParsedSignal))

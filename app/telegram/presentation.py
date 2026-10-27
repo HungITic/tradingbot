@@ -48,11 +48,15 @@ def trade_title(item):
 
 def position_card(pos, currency="", ordinal=None):
     prefix = f"{ordinal}. " if ordinal is not None else ""
+    branch = (" · Min Entry" if pos.members and ('min-entry:' in pos.comment or 'override-min:' in pos.comment)
+              else " · Max Entry" if pos.members and ('max-entry:' in pos.comment or 'override-max:' in pos.comment) else "")
+    targets = (' · '.join(f"{'TP1' if p.comment.endswith(':tp1') else 'TP2'} {price(p.tp)} ({number(p.volume)} lot)" for p in pos.members)
+               if pos.members else f"TP {price(pos.tp)}")
     return "\n".join([
-        heading(prefix + trade_title(pos)) + f" · <code>#{pos.ticket}</code>",
+        heading(prefix + trade_title(pos) + branch) + f" · <code>#{pos.ticket}</code>",
         f"PnL đang chạy <b>{escape(money(pos.profit, currency, signed=True))}</b> · {number(pos.volume)} lot",
         f"Entry {price(pos.open_price)} → Hiện tại {price(pos.current_price)}",
-        f"SL {price(pos.sl)} · TP {price(pos.tp)}",
+        f"SL {price(pos.sl)} · {targets}",
     ])
 
 
@@ -102,6 +106,8 @@ def execution_card(title, request, result, timestamp=None):
         + f"SL {price(request.sl)} · TP {price(request.tp)}"]
     if request.tp1 is not None and request.tp2 is not None:
         blocks.append(f"TP1 {price(request.tp1)} · TP2 {price(request.tp2)}")
+    if result.raw.get('native_children'):
+        blocks.append('TP trên MT5: ' + ' · '.join(f"{number(req.volume)} lot → {price(req.tp)}" for req, _ in result.raw['native_children']))
     if timestamp:
         blocks.append(f"<i>{escape(timestamp)}</i>")
     return join_cards(blocks)

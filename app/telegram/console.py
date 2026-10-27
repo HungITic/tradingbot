@@ -96,7 +96,7 @@ class TelegramConsoleMixin:
         return join_cards(blocks), build_status_keyboard(summary["bot_enabled"])
 
     async def positions_view(self, page: int = 0):
-        positions = sorted(await self.service.broker.get_positions(), key=lambda p: p.ticket)
+        positions = sorted(await self.service.get_open_positions(), key=lambda p: p.ticket)
         page = min(max(page, 0), max(0, (len(positions) - 1) // 5))
         pages = max(1, (len(positions) + 4) // 5)
         currency = await self.display_currency()
@@ -349,7 +349,7 @@ class TelegramConsoleMixin:
         elif data in {"close_all_confirm", "cancel_all_orders"} or data.startswith(("close_", "cancel_", "partial_")):
             percentage = cfg.default_partial_close_percent
             if data == "close_all_confirm" or data.startswith("partial_all_"):
-                tickets = [p.ticket for p in await self.service.broker.get_positions()]
+                tickets = [p.ticket for p in await self.service.get_open_positions()]
                 action = "close" if data == "close_all_confirm" else "partial"
             elif data == "cancel_all_orders":
                 tickets = [o.ticket for o in await self.service.broker.get_pending_orders()]

@@ -33,6 +33,7 @@ CONFIG_SECTIONS = {
 
 
 CONFIG_HELP = {
+    "default_partial_close_percent": "Tỷ lệ TP1 của lệnh mới được dùng để chia lot ngay khi mở; TP1/TP2 chạy trên MT5. Đổi tỷ lệ không tự chia lại lệnh đang mở. Tỷ lệ này cũng dùng cho chốt chung; entry xấu có tỷ lệ riêng.",
     "bad_entry_partial_close_percent": "Chỉ áp dụng cho tin có ‘chốt bớt’ và ‘xấu’: chốt phần trăm khối lượng còn lại của Min Entry. Nhập từ 0 đến 100: 0 bỏ qua chốt, 100 đóng hết Min Entry. Phần trăm ghi rõ trong tin được ưu tiên; TP1 và chốt chung dùng tỷ lệ riêng.",
     "min_lot": "Giới hạn dưới cho mỗi lệnh. Lot mặc định và cả hai nhánh phải nằm trong khoảng min/max.",
     "max_lot": "Giới hạn trên cho mỗi lệnh, không phải tổng lot của tài khoản. Lot mặc định và cả hai nhánh phải nằm trong khoảng min/max.",
@@ -48,7 +49,7 @@ CONFIG_HELP = {
 CONFIG_GROUP_HELP = {
     "entry": "Lot tối thiểu/tối đa là giới hạn mỗi lệnh. Min Entry/Max Entry là hai đầu giá của vùng entry.\n\nNếu cần đổi nhiều lot cùng lúc, gửi ví dụ:\n<code>/config set min_lot=0.02 max_lot=0.10 default_lot=0.02 lot_min_entry=0.02 lot_max_entry=0.02</code>",
     "sl": "Hòa vốn dùng entry riêng từng lệnh. Bù giá BUY cộng, SELL trừ.",
-    "profit": "Một TP: đóng toàn bộ.\nTP1 + TP2: chốt theo tỷ lệ rồi giữ phần còn lại.",
+    "profit": "Một TP: đóng toàn bộ.\nLệnh mới có TP1 + TP2: chia lot theo tỷ lệ, gắn TP trực tiếp trên MT5. Đổi tỷ lệ áp dụng cho lần mở sau; không đủ lot để chia sẽ từ chối mở.",
     "risk": "Giới hạn lệnh tính cả vị thế và lệnh chờ. Danh sách mã áp dụng cho lệnh mở mới.",
     "signal": "Thời hạn tín hiệu và thời gian lọc trùng được tính bằng giây.",
     "broker": "Giờ hiển thị dùng giờ Việt Nam. Mục này cấu hình giờ máy chủ sàn để quy đổi lịch sử giao dịch.",

@@ -12,6 +12,7 @@ from app.broker.base import OrderResult, PositionInfo
 from app.config import database
 from app.models.trade import ManagementAction, Order, Position
 from app.signal.models import ManagementType
+from app.trading.native_tp import branch_comment, native_comment
 
 logger = structlog.get_logger(__name__)
 
@@ -27,8 +28,9 @@ class PositionPolicyMixin:
         return (f"<b>SL VÀ HÒA VỐN</b>\nHòa vốn theo giá, chưa tính phí/swap: {scope}; không tính trung bình hai entry.\n"
                 f"Bù giá: BUY +{cfg.breakeven_offset_price}, SELL −{cfg.breakeven_offset_price}.\n"
                 f"\n<b>CHỐT LỜI</b>\nTP1 khi có TP2: {'bật' if cfg.tp1_enabled else 'tắt'}, chốt {cfg.default_partial_close_percent}%.\n"
+                "Lệnh mới: tách khối lượng TP1/TP2, TP chạy trên MT5; đổi tỷ lệ chỉ áp dụng cho lần mở sau.\n"
                 f"Tự dời SL sau chốt: {'bật' if cfg.auto_breakeven_on_partial else 'tắt'}.\n"
-                f"Thiếu lot tại TP1: {'chỉ dời SL nếu đã bật tự dời' if cfg.tp1_min_volume_action == 'breakeven' else 'bỏ qua'}.\n"
+                "Không đủ lot để tách: từ chối mở nhánh. Chính sách thiếu lot TP1 chỉ dùng cho lệnh cũ.\n"
                 "Chỉ có một TP: đóng toàn bộ tại TP đó.\n"
                 f"\n<b>QUẢN LÝ NHÁNH</b>\nChốt bớt + xấu: chốt {cfg.bad_entry_partial_close_percent}% Min Entry, giữ Max Entry.\n"
                 f"Chốt bớt chung dùng tỷ lệ cấu hình: {'bật' if cfg.generic_partial_uses_default else 'tắt'}.\n"
@@ -49,9 +51,11 @@ class PositionPolicyMixin:
         if not positions:
             return {}
         async with database.get_session() as session:
+            opening = {p.ticket: self._position_opening_orders.get(p.identifier or p.ticket, p.ticket) for p in positions}
             rows = await session.scalars(select(Order).where(
-                Order.mt5_ticket.in_([p.ticket for p in positions])))
-            return {o.mt5_ticket: o for o in rows.all()}
+                Order.mt5_ticket.in_(list(opening.values()))))
+            by_ticket = {o.mt5_ticket: o for o in rows.all()}
+            return {p.ticket: by_ticket[opening[p.ticket]] for p in positions if opening[p.ticket] in by_ticket}
 
     async def position_groups(self, positions: list[PositionInfo], orders: dict | None = None) -> dict:
         """Unknown membership stays isolated; symbol or direction alone never identifies a setup."""
@@ -81,8 +85,20 @@ class PositionPolicyMixin:
         offset = self.risk_config.breakeven_offset_price
         return base + offset if target.position_type == "BUY" else base - offset
 
-    async def apply_stop(self, target: PositionInfo, price: Decimal, *, protect: bool = True) -> OrderResult:
+    async def apply_stop(self, target: PositionInfo, price: Decimal, *, protect: bool = True,
+                         per_member_entry: bool = False) -> OrderResult:
         """Normalize to broker precision and validate against a fresh executable quote."""
+        if target.members:
+            results = []
+            live = {p.ticket: p for p in await self.broker.get_positions()}
+            for previous in target.members:
+                child = live.get(previous.ticket)
+                if child is None:
+                    continue
+                result = await self.apply_stop(child, self.breakeven_target(child, [], {}) if per_member_entry else price, protect=protect)
+                results.append((child, result, Decimal('0')))
+            return OrderResult(bool(results) and all(r.success for _, r, _ in results), ticket=target.ticket, price=price,
+                               comment='Đã xử lý SL từng vị thế con', raw={'member_results': results})
         if not price.is_finite() or price <= 0:
             return OrderResult(False, ticket=target.ticket, comment="Giá SL không hợp lệ")
         try:
@@ -106,7 +122,7 @@ class PositionPolicyMixin:
             return OrderResult(False, ticket=target.ticket, comment=f"Không kiểm tra/sửa được SL: {exc}")
 
     async def breakeven_preview(self, ticket: int) -> dict:
-        positions = await self.broker.get_positions()
+        positions = await self.get_open_positions()
         target = next((p for p in positions if p.ticket == ticket), None)
         if target is None:
             raise ValueError("Không tìm thấy vị thế")
@@ -115,13 +131,18 @@ class PositionPolicyMixin:
             Decimal(1).scaleb(-spec.digits), rounding=ROUND_HALF_UP)
         text = (f"🎯 <b>Xem trước hòa vốn · #{ticket}</b>\n"
                 f"SL hiện tại: {target.sl or '—'}\nSL tính theo chính sách: {price}\n"
-                "Chỉ sửa ticket được chọn; không sửa các ticket khác.\n"
+                + ("Sửa SL từng vị thế con trong nhánh đã chọn, dùng entry riêng.\n" if target.members
+                 else "Chỉ sửa ticket được chọn; không sửa các ticket khác.\n")
                 + self.management_policy_description())
+        if target.members:
+            prices = '\n'.join(f"#{p.ticket}: SL {self.breakeven_target(p, [], {})}" for p in target.members)
+            text = (f"🎯 <b>Xem trước hòa vốn · nhánh #{ticket}</b>\n{prices}\n"
+                    "Mỗi vị thế con dùng entry riêng; chưa thực thi.\n" + self.management_policy_description())
         return {"text": text, "price": price}
 
     async def move_to_breakeven(self, ticket: int, expected_price: Decimal | None = None) -> OrderResult:
         async with self._execution_lock:
-            positions = await self.broker.get_positions()
+            positions = await self.get_open_positions()
             target = next((p for p in positions if p.ticket == ticket), None)
             if target is None:
                 return OrderResult(False, ticket=ticket, comment="Không tìm thấy vị thế")
@@ -131,7 +152,7 @@ class PositionPolicyMixin:
                 price = price.quantize(Decimal(1).scaleb(-spec.digits), rounding=ROUND_HALF_UP)
                 if price != expected_price:
                     return OrderResult(False, ticket=ticket, comment="Giá hòa vốn đã thay đổi; hãy mở lại bản xem trước")
-            return await self.apply_stop(target, price)
+            return await self.apply_stop(target, price, per_member_entry=True)
 
     async def partial_volume(self, pos: PositionInfo, percentage: Decimal) -> Decimal:
         pct = Decimal(str(percentage))
@@ -151,6 +172,8 @@ class PositionPolicyMixin:
         return volume
 
     async def partial_one(self, pos: PositionInfo, percentage: Decimal) -> tuple[OrderResult, Decimal]:
+        if pos.members:
+            return await self.close_native_fraction(pos, percentage)
         try:
             volume = await self.partial_volume(pos, percentage)
         except Exception as exc:
@@ -183,6 +206,13 @@ class PositionPolicyMixin:
         return partial, tp1_done
 
     async def record_management(self, signal_id, pos, action, result, **parameters):
+        if 'member_results' in result.raw:
+            for child, child_result, amount in result.raw['member_results']:
+                child_parameters = {**parameters}
+                if action in {'CLOSE', 'PARTIAL_CLOSE'}:
+                    child_parameters['volume'] = str(amount)
+                await self.record_management(signal_id, child, action, child_result, **child_parameters)
+            return
         metadata = {}
         if action in {"CLOSE", "PARTIAL_CLOSE"}:
             cause = parameters.get("reason")
@@ -199,13 +229,13 @@ class PositionPolicyMixin:
 
     async def partial_close_positions(self, percentage=Decimal("50"), symbol=None, ticket=None):
         async with self._execution_lock:
-            all_positions = await self.broker.get_positions()
+            all_positions = await self.get_open_positions()
             positions = all_positions
             if symbol:
                 clean = symbol.upper().replace("#", "").strip()
                 positions = [p for p in positions if p.symbol.upper().startswith(clean)]
             if ticket is not None:
-                positions = [p for p in positions if p.ticket == ticket]
+                positions = [p for p in positions if p.ticket == ticket or any(c.ticket == ticket for c in p.members)]
             return await self.partial_positions(positions, percentage, all_positions)
 
     async def partial_positions(self, positions, percentage, all_positions=None):
@@ -219,6 +249,7 @@ class PositionPolicyMixin:
             order = orders.get(pos.ticket)
             already = pos.ticket in history or pos.ticket in self._tp1_processed_tickets
             already |= bool(order and order.volume is not None and pos.volume < order.volume)
+            already |= pos.initial_volume is not None and pos.volume < pos.initial_volume
             if already and Decimal(str(percentage)) not in {0, 100} and not self.risk_config.allow_multiple_partial_closes:
                 result, volume = OrderResult(False, ticket=pos.ticket, comment="Vị thế đã chốt một phần; đã chặn chốt lặp"), Decimal("0")
             else:
@@ -229,7 +260,7 @@ class PositionPolicyMixin:
                     await self.record_management(group if isinstance(group, int) else None,
                                                  pos, "PARTIAL_CLOSE", result, volume=str(volume), reason="MANUAL_PARTIAL")
                     if self.risk_config.auto_breakeven_on_partial and volume < pos.volume:
-                        be = await self.apply_stop(pos, self.breakeven_target(pos, all_positions, groups))
+                        be = await self.apply_stop(pos, self.breakeven_target(pos, all_positions, groups), per_member_entry=True)
                         await self.record_management(None, pos, "AUTO_BREAKEVEN", be, reason="MANUAL_PARTIAL", sl=str(be.price))
                         result.comment += (f" · SL: {be.price} ({be.comment})" if be.success
                                            else " · Chốt thành công nhưng chưa dời SL: " + be.comment)
@@ -247,11 +278,14 @@ class PositionPolicyMixin:
         positions = await self.broker.get_positions()
         orders = await self.position_orders(positions)
         groups = await self.position_groups(positions, orders)
+        await self.native_tp_breakeven(positions, orders)
         previous_partial, completed = await self.management_history(positions)
         for pos in positions:
             order = orders.get(pos.ticket)
             if order is None:
                 continue
+            if native_comment(getattr(order, 'comment', None)):
+                continue  # Broker owns all TP execution for these legs, even after restart.
             reached = lambda price: price is not None and (pos.current_price >= price if pos.position_type == "BUY" else pos.current_price <= price)
             # A single target is always a full exit on the broker. Never race it with partial close.
             final_tp = order.tp2 or order.tp1
@@ -305,8 +339,8 @@ class PositionPolicyMixin:
     def entry_role(position, order=None):
         roles = {"bot-min-entry": "MIN_ENTRY", "bot-override-min": "MIN_ENTRY",
                  "bot-max-entry": "MAX_ENTRY", "bot-override-max": "MAX_ENTRY"}
-        stored = roles.get(getattr(order, "comment", None))
-        live = roles.get(position.comment)
+        stored = roles.get(branch_comment(getattr(order, "comment", None)))
+        live = roles.get(branch_comment(position.comment))
         if stored and live and stored != live:
             return None  # Conflicting provenance must not select the wrong branch.
         return stored or live
@@ -335,7 +369,7 @@ class PositionPolicyMixin:
                 or (groups.get(p.ticket), p.symbol, p.position_type) in scopes]
 
     async def process_management_signal(self, signal, signal_id, reply_id, link):
-        positions = await self.broker.get_positions()
+        positions = await self.get_open_positions()
         pending = []
         reply_tag = f"Signal #{reply_id}" if reply_id is not None else signal.symbol or "toàn tài khoản"
         if reply_id is not None:
@@ -345,7 +379,7 @@ class PositionPolicyMixin:
                 await self.set_signal_status(signal_id, "REJECTED", reason)
                 await self.notify(reason)
                 return
-            positions = [p for p in positions if p.ticket in tickets]
+            positions = [p for p in positions if self.branch_has_ticket(p, tickets)]
             pending = [o for o in await self.broker.get_pending_orders() if o.ticket in tickets]
         elif signal.symbol:
             positions = [p for p in positions if p.symbol.upper().startswith(signal.symbol.upper())]
@@ -400,11 +434,14 @@ class PositionPolicyMixin:
                     db_order = orders.get(pos.ticket)
                     already = pos.ticket in partial_history or pos.ticket in self._tp1_processed_tickets
                     already |= bool(db_order and db_order.volume is not None and pos.volume < db_order.volume)
+                    already |= pos.initial_volume is not None and pos.volume < pos.initial_volume
                     if partial and percentage < 100 and already and not self.risk_config.allow_multiple_partial_closes:
                         await self.notify(f"ℹ️ {reply_tag} · Bỏ qua chốt bớt #{pos.ticket}: Vị thế đã chốt 1 phần trước đó.")
                         continue
                     if partial:
                         result, volume = await self.partial_one(pos, percentage)
+                    elif pos.members:
+                        result, volume = await self.close_native_fraction(pos, Decimal('100'))
                     else:
                         volume = pos.volume
                         result = await self.broker.close_position(pos.ticket, volume)
@@ -420,7 +457,7 @@ class PositionPolicyMixin:
                         self._tp1_processed_tickets.add(pos.ticket)
                         partial_history.add(pos.ticket)
                         if self.risk_config.auto_breakeven_on_partial and not has_stop and volume < pos.volume:
-                            be = await self.apply_stop(pos, self.breakeven_target(pos, positions, groups))
+                            be = await self.apply_stop(pos, self.breakeven_target(pos, positions, groups), per_member_entry=True)
                             outcomes.append(be.success)
                             await self.record_management(signal_id, pos, "AUTO_BREAKEVEN", be, sl=str(be.price))
                             await self.notify(f"{'✅' if be.success else '❌'} Auto Breakeven on Partial · #{pos.ticket}: {escape(be.comment)}")
@@ -428,7 +465,7 @@ class PositionPolicyMixin:
                         await self.cancel_dual_entry_pending_orders_on_close(pos.ticket, reason="Tín hiệu đóng lệnh")
                 elif action.action_type in {ManagementType.MOVE_SL, ManagementType.BREAKEVEN}:
                     price = action.price if action.price is not None else self.breakeven_target(pos, positions, groups)
-                    result = await self.apply_stop(pos, price, protect=action.price is None)
+                    result = await self.apply_stop(pos, price, protect=action.price is None, per_member_entry=action.price is None)
                     outcomes.append(result.success)
                     await self.record_management(signal_id, pos, action.action_type.value, result, sl=str(result.price))
                     await self.notify(f"{'✅' if result.success else '❌'} {reply_tag} · SL #{pos.ticket}: {escape(result.comment)}")

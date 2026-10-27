@@ -104,11 +104,11 @@ class TradingSafetyMixin:
                 section("BẢO VỆ LỆNH", field("SL · Dừng lỗ", display_price(order.stop_loss), code=True),
                     field("TP1", display_price(order.take_profit), code=True), field("TP2", display_price(order.take_profit_2), code=True)), "",
                 "SL/TP đã bù 0.5 giá từ tín hiệu: BUY trừ 0.5 · SELL cộng 0.5.", "",
-                section("KHỐI LƯỢNG DỰ KIẾN", field("Số lệnh tối đa", len(volumes)),
+                section("KHỐI LƯỢNG DỰ KIẾN", field("Số lệnh tối đa", len(volumes) * self.native_leg_count(order.take_profit, order.take_profit_2)),
                     field("Tổng khối lượng", f"{number(sum(volumes))} lot")), ""]
             if not problem:
                 context = await self.build_risk_context()
-                context.planned_order_count = len(volumes)
+                context.planned_order_count = len(volumes) * self.native_leg_count(order.take_profit, order.take_profit_2)
                 decision = self.risk_engine.evaluate(signal, context)
                 if not decision.approved:
                     problem = decision.rejection_reason
@@ -119,8 +119,13 @@ class TradingSafetyMixin:
                     lines.append(field("Giá hiện tại", number(price, minimum=2), code=True))
                     req = OrderRequest(order.symbol, order.action.value, volumes[0], price,
                                        order.stop_loss, order.take_profit_2 or order.take_profit,
-                                       order.take_profit, order.take_profit_2)
+                                       order.take_profit, order.take_profit_2, comment='bot-market')
                     problem = self.check_request(req)
+                    for volume in volumes:
+                        from dataclasses import replace
+                        legs = await self.prepare_native_orders(replace(req, volume=volume))
+                        if len(legs) > 1:
+                            lines.append('Tách TP trên MT5: ' + ' · '.join(f'{number(r.volume)} lot → {display_price(r.tp)}' for r in legs))
                 except Exception as exc:
                     problem = str(exc)
             can_execute = not problem
@@ -129,10 +134,10 @@ class TradingSafetyMixin:
         else:
             lines.append("Quản lý vị thế: " + ", ".join(a.action_type.value for a in signal.management_actions))
             reply_id = kwargs.get("reply_to_msg_id")
-            positions = await self.broker.get_positions()
+            positions = await self.get_open_positions()
             if reply_id is not None:
                 tickets = await self.get_tickets_for_reply_message(reply_id)
-                positions = [p for p in positions if p.ticket in tickets]
+                positions = [p for p in positions if self.branch_has_ticket(p, tickets)]
                 lines.append("Phạm vi reply: " + (", ".join(map(str, tickets)) or "không tìm thấy vị thế"))
                 problem = problem or (None if tickets else "Không xác định được kèo đích")
             elif signal.symbol:
@@ -244,7 +249,7 @@ class TradingSafetyMixin:
         from sqlalchemy import select
         from app.config.database import get_session
         from app.models.trade import Order
-        positions = await self.broker.get_positions()
+        positions = await self.get_open_positions()
         orders = await self.broker.get_pending_orders()
         tickets = [x.ticket for x in positions + orders]
         memberships = {}
