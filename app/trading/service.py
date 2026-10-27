@@ -45,9 +45,10 @@ from app.telegram.presentation import execution_card
 from app.trading.position_policy import PositionPolicyMixin
 from app.trading.close_reporting import CloseReportingMixin
 from app.trading.native_tp import NativeTPMixin, branch_comment, native_comment
+from app.trading.management_scope import ManagementScopeMixin
 
 
-class TradingService(NativeTPMixin, CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixin):
+class TradingService(ManagementScopeMixin, NativeTPMixin, CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixin):
     """Core trade coordinator and order router."""
 
     def __init__(
@@ -97,7 +98,7 @@ class TradingService(NativeTPMixin, CloseReportingMixin, PositionPolicyMixin, Tr
         self._tp1_completed_tickets: set[int] = set()
         self._signal_message_links: dict[int, str] = {}
         self._order_message_links: dict[int, str] = {}
-        self._signal_msg_id_to_tickets: dict[int, list[int]] = {}
+        self._signal_msg_id_to_tickets: dict[int | tuple[int, int], list[int]] = {}
         self._signal_db_id_to_tickets: dict[int, list[int]] = {}
         self._ticket_to_signal_db_id: dict[int, int] = {}
         self._ticket_to_msg_id: dict[int, int] = {}
@@ -347,7 +348,8 @@ class TradingService(NativeTPMixin, CloseReportingMixin, PositionPolicyMixin, Tr
             if not entry or target not in {"both", "min", "max"}:
                 return "❌ Lệnh chờ không còn hiệu lực."
             signal = entry["signal"]
-            problem = self.signal_problem(signal, entry["signal_time"])
+            problem = self.signal_problem(signal, entry["signal_time"],
+                                          skip_signal_expiry_check=entry.get('skip_signal_expiry_check', False))
             if problem:
                 self._pending_overrides.pop(signal_db_id, None)
                 await self.set_signal_status(entry.get("db_id"), "EXPIRED", problem)
@@ -643,11 +645,12 @@ class TradingService(NativeTPMixin, CloseReportingMixin, PositionPolicyMixin, Tr
 
         return cancelled_tickets
 
-    async def get_tickets_for_reply_message(self, reply_to_msg_id: int) -> list[int]:
+    async def get_tickets_for_reply_message(self, reply_to_msg_id: int, chat_id: int | None = None) -> list[int]:
         """Find MT5 tickets associated with the replied-to signal message ID."""
         tickets: list[int] = []
-        if reply_to_msg_id in self._signal_msg_id_to_tickets:
-            for t in self._signal_msg_id_to_tickets[reply_to_msg_id]:
+        cache_key = (chat_id, reply_to_msg_id) if chat_id is not None else reply_to_msg_id
+        if cache_key in self._signal_msg_id_to_tickets:
+            for t in self._signal_msg_id_to_tickets[cache_key]:
                 if t not in tickets:
                     tickets.append(t)
             if tickets:
@@ -656,7 +659,7 @@ class TradingService(NativeTPMixin, CloseReportingMixin, PositionPolicyMixin, Tr
         try:
             from sqlalchemy import select
             from app.config.database import get_session
-            from app.models.signal import Signal as DBSignal
+            from app.models.signal import Signal as DBSignal, SignalSource
             from app.models.trade import Order as DBOrder
 
             async with get_session() as session:
@@ -666,12 +669,14 @@ class TradingService(NativeTPMixin, CloseReportingMixin, PositionPolicyMixin, Tr
                     .where(DBSignal.telegram_message_id == reply_to_msg_id)
                     .where(DBOrder.mt5_ticket.isnot(None))
                 )
+                if chat_id is not None:
+                    stmt = stmt.join(SignalSource, DBSignal.source_id == SignalSource.id).where(SignalSource.chat_id == chat_id)
                 db_tickets = list((await session.scalars(stmt)).all())
                 for t in db_tickets:
                     if t not in tickets:
                         tickets.append(t)
                 if tickets:
-                    self._signal_msg_id_to_tickets[reply_to_msg_id] = tickets
+                    self._signal_msg_id_to_tickets[cache_key] = tickets
         except Exception as e:
             logger.warning("get_tickets_for_reply_db_error", reply_to_id=reply_to_msg_id, error=str(e))
 
@@ -759,6 +764,9 @@ class TradingService(NativeTPMixin, CloseReportingMixin, PositionPolicyMixin, Tr
         message_link: str | None = None,
         reply_to_msg_id: int | None = None,
         signal_time: datetime | None = None,
+        skip_signal_expiry_check: bool = False,
+        reentry_origin: dict | None = None,
+        management_scope: dict | None = None,
     ) -> None:
         """Full pipeline: Raw message -> Parse -> Risk -> Execute -> Notify."""
         logger.info(
@@ -813,7 +821,9 @@ class TradingService(NativeTPMixin, CloseReportingMixin, PositionPolicyMixin, Tr
                     self._signal_message_links[signal_db_id] = message_link
 
                 if signal.new_order:
-                    meta = {"message_link": message_link} if message_link else None
+                    meta = {"message_link": message_link} if message_link else {}
+                    if reentry_origin is not None:
+                        meta['reentry_origin'] = reentry_origin
                     parsed_record = DBParsedSignal(
                         signal_id=signal_db_id,
                         action=signal.new_order.action.value,
@@ -824,7 +834,7 @@ class TradingService(NativeTPMixin, CloseReportingMixin, PositionPolicyMixin, Tr
                         take_profit=signal.new_order.take_profit,
                         take_profit_2=signal.new_order.take_profit_2,
                         raw_tp_text=signal.new_order.raw_tp_text,
-                        extra_metadata=meta,
+                        extra_metadata=meta or None,
                     )
                     session.add(parsed_record)
         except Exception as e:
@@ -840,7 +850,7 @@ class TradingService(NativeTPMixin, CloseReportingMixin, PositionPolicyMixin, Tr
         # Preserve source levels in the audit above and adjust once for execution.
         # Override requests retain these adjusted levels without shifting them again.
         signal = self.adjusted_signal_levels(signal)
-        problem = self.signal_problem(signal, signal_time)
+        problem = self.signal_problem(signal, signal_time, skip_signal_expiry_check=skip_signal_expiry_check)
         if problem:
             await self.set_signal_status(signal_db_id, "REJECTED", problem)
             await self.notify(self.format_notification(f"⛔ <b>Signal Rejected</b>\n{escape(problem)}", message_link))
@@ -932,7 +942,8 @@ class TradingService(NativeTPMixin, CloseReportingMixin, PositionPolicyMixin, Tr
                 return
             context.planned_order_count = (2 if has_dual_entry else 1) * self.native_leg_count(signal.new_order.take_profit, signal.new_order.take_profit_2)
             override_data = {"signal": signal, "signal_time": signal_time, "db_id": signal_db_id,
-                             "message_id": message_id, "allowed_rule": None}
+                             "message_id": message_id, "allowed_rule": None,
+                             "skip_signal_expiry_check": skip_signal_expiry_check}
             decision = self.risk_engine.evaluate(signal, context)
 
             if not decision.approved:
@@ -1158,7 +1169,8 @@ class TradingService(NativeTPMixin, CloseReportingMixin, PositionPolicyMixin, Tr
             return
 
         if signal.message_type == MessageType.POSITION_MANAGEMENT:
-            await self.process_management_signal(signal, signal_db_id, reply_to_msg_id, message_link)
+            await self.process_management_signal(signal, signal_db_id, reply_to_msg_id, message_link,
+                chat_id=chat_id, message_id=message_id, management_scope=management_scope)
 
     # -------------------------------------------------------------
     # Admin Control Operations (called by Personal Telegram Bot)

@@ -1048,8 +1048,13 @@ class PersonalTelegramBot(TelegramConsoleMixin):
                 raise ValueError("Thiếu thời gian gốc của tin nhắn; không cho phép thực thi")
             payload = {"raw_text": raw_text, "is_reentry": is_reentry, "message_id": msg_id,
                        "chat_id": chat_id, "message_link": canonical_link,
-                       "reply_to_msg_id": reply_to_msg_id, "signal_time": signal_time}
+                       "reply_to_msg_id": reply_to_msg_id, "signal_time": signal_time,
+                       "skip_signal_expiry_check": True}
+            if len(fetch_res) > 7:
+                payload['reentry_origin'] = fetch_res[7]
             preview = await self.service.preview_signal(**payload)
+            if preview.get('management_scope'):
+                payload['management_scope'] = preview['management_scope']
             token = self.new_draft("signal", payload)
             text = preview["text"] + "\n\n<b>Nội dung gốc:</b>\n<pre>" + escape(raw_text[:800]) + "</pre>"
             await status_msg.edit_text(text, parse_mode=ParseMode.HTML,

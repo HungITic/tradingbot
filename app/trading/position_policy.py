@@ -368,12 +368,31 @@ class PositionPolicyMixin:
         return [p for p in positions if p.ticket in tickets
                 or (groups.get(p.ticket), p.symbol, p.position_type) in scopes]
 
-    async def process_management_signal(self, signal, signal_id, reply_id, link):
+    async def process_management_signal(self, signal, signal_id, reply_id, link, *,
+                                        chat_id=None, message_id=None, management_scope=None):
         positions = await self.get_open_positions()
         pending = []
+        try:
+            scope = await self.resolve_management_scope(signal, reply_id, chat_id, message_id, management_scope)
+            if scope:
+                await self.audit_management_scope(signal_id, scope)
+                reply_id = scope['message_id']
+        except Exception as exc:
+            await self.set_signal_status(signal_id, 'REJECTED', str(exc))
+            await self.notify(f'⛔ {escape(str(exc))}')
+            return
         reply_tag = f"Signal #{reply_id}" if reply_id is not None else signal.symbol or "toàn tài khoản"
+        if scope:
+            from app.telegram.utils import construct_telegram_message_link
+            source_link = construct_telegram_message_link(chat_id, reply_id)
+            reply_tag = f'<a href="{source_link}">Signal gần nhất</a>'
         if reply_id is not None:
-            tickets = await self.get_tickets_for_reply_message(reply_id)
+            if scope:
+                tickets = scope['tickets']
+            elif chat_id is not None:
+                tickets = await self.get_tickets_for_reply_message(reply_id, chat_id=chat_id)
+            else:
+                tickets = await self.get_tickets_for_reply_message(reply_id)
             if not tickets:
                 reason = f"Không tìm thấy kèo của tin reply #{reply_id}; chưa thay đổi vị thế nào."
                 await self.set_signal_status(signal_id, "REJECTED", reason)

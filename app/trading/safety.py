@@ -26,14 +26,14 @@ class TradingSafetyMixin:
             levels[name] = value + offset if value is not None else None
         return signal.model_copy(update={"new_order": order.model_copy(update=levels)})
 
-    def signal_problem(self, signal, signal_time: datetime | None = None) -> str | None:
+    def signal_problem(self, signal, signal_time: datetime | None = None, *, skip_signal_expiry_check: bool = False) -> str | None:
         if signal_time is not None:
             if signal_time.tzinfo is None:
                 return "Thời gian tín hiệu phải có múi giờ."
             age = (datetime.now(timezone.utc) - signal_time.astimezone(timezone.utc)).total_seconds()
             if age < -30:
                 return "Thời gian tín hiệu nằm trong tương lai; cần kiểm tra đồng hồ."
-            if age > self.risk_config.signal_expire_seconds:
+            if not skip_signal_expiry_check and age > self.risk_config.signal_expire_seconds:
                 return f"Tín hiệu đã hết hạn ({int(age)} giây; giới hạn {self.risk_config.signal_expire_seconds} giây)."
         if signal.management_actions and self.risk_config.require_explicit_close:
             ambiguous = {"chốt nha", "chốt nhé", "chốt đi", "chốt lời", "dừng"}
@@ -80,16 +80,24 @@ class TradingSafetyMixin:
         return None
 
     async def preview_signal(self, raw_text: str, signal_time: datetime | None = None,
-                             is_reentry: bool = False, **kwargs: Any) -> dict:
+                             is_reentry: bool = False, skip_signal_expiry_check: bool = False, **kwargs: Any) -> dict:
         """Does not write the DB, send notifications, or execute broker operations."""
         signal = self.parser.parse(raw_text)
         signal.is_reentry = is_reentry
         signal = self.adjusted_signal_levels(signal)
-        problem = self.signal_problem(signal, signal_time)
+        problem = self.signal_problem(signal, signal_time, skip_signal_expiry_check=skip_signal_expiry_check)
         lines = [heading("🔎 Xem trước tín hiệu", "Chưa thực thi giao dịch"), ""]
+        origin = kwargs.get('reentry_origin')
+        if is_reentry and isinstance(origin, dict):
+            from app.telegram.utils import construct_telegram_message_link
+            link = construct_telegram_message_link(origin.get('chat_id'), origin.get('root_message_id'))
+            if link:
+                lines.append(f'Vòng mới từ <a href="{escape(link, quote=True)}">signal gốc</a> · '
+                             f'{max(0, len(origin.get("message_path", [])) - 1)} bước reply')
         if signal_time:
             lines.append(f"Tin gốc: {escape(to_vietnam_datetime(signal_time).strftime('%H:%M:%S %d/%m/%Y'))}")
         can_execute = False
+        management_scope = None
         if signal.message_type == MessageType.UNKNOWN:
             lines.append("Không xác định được hành động rõ ràng. Tin mơ hồ/điều kiện cần được làm rõ.")
         elif signal.new_order:
@@ -135,9 +143,28 @@ class TradingSafetyMixin:
             lines.append("Quản lý vị thế: " + ", ".join(a.action_type.value for a in signal.management_actions))
             reply_id = kwargs.get("reply_to_msg_id")
             positions = await self.get_open_positions()
+            pending_scope = []
+            try:
+                management_scope = await self.resolve_management_scope(signal, reply_id, kwargs.get('chat_id'),
+                    kwargs.get('message_id'), kwargs.get('management_scope'))
+                if management_scope:
+                    reply_id = management_scope['message_id']
+                    from app.telegram.utils import construct_telegram_message_link
+                    source_link = construct_telegram_message_link(management_scope['chat_id'], reply_id)
+                    lines.append(f'Không có reply: áp dụng <a href="{source_link}">signal mở lệnh gần nhất</a> trong cùng chat.')
+            except Exception as exc:
+                problem = problem or str(exc)
+                positions = []
             if reply_id is not None:
-                tickets = await self.get_tickets_for_reply_message(reply_id)
+                if management_scope:
+                    tickets = management_scope['tickets']
+                elif kwargs.get('chat_id') is not None:
+                    tickets = await self.get_tickets_for_reply_message(reply_id, chat_id=kwargs['chat_id'])
+                else:
+                    tickets = await self.get_tickets_for_reply_message(reply_id)
                 positions = [p for p in positions if self.branch_has_ticket(p, tickets)]
+                if any(a.action_type.value == 'CLOSE' for a in signal.management_actions):
+                    pending_scope = [o for o in await self.broker.get_pending_orders() if o.ticket in tickets]
                 lines.append("Phạm vi reply: " + (", ".join(map(str, tickets)) or "không tìm thấy vị thế"))
                 problem = problem or (None if tickets else "Không xác định được kèo đích")
             elif signal.symbol:
@@ -153,7 +180,9 @@ class TradingSafetyMixin:
                     else:
                         problem = problem or "Cần symbol, reply đúng kèo hoặc chỉ rõ 'tất cả'"
             lines.append(f"Phạm vi: {len(positions)} vị thế theo bộ lọc {escape(signal.symbol or 'reply/toàn tài khoản')}")
-            problem = problem or (None if positions else "Không có vị thế phù hợp")
+            if pending_scope:
+                lines.append(f'Có {len(pending_scope)} lệnh chờ thuộc kèo trong phạm vi đóng.')
+            problem = problem or (None if positions or pending_scope else "Không có vị thế phù hợp")
             if any(a.target == "MIN_ENTRY" for a in signal.management_actions) and positions:
                 try:
                     orders = await self.position_orders(positions)
@@ -175,7 +204,10 @@ class TradingSafetyMixin:
             lines.extend(["", section("⛔ CHƯA ĐỦ ĐIỀU KIỆN", escape(problem))])
         else:
             lines.extend(["", section("✅ KẾT QUẢ KIỂM TRA", "Đủ điều kiện để gửi vào luồng kiểm tra thực thi.")])
-        return {"text": "\n".join(lines), "can_execute": can_execute}
+        result = {"text": "\n".join(lines), "can_execute": can_execute}
+        if management_scope:
+            result['management_scope'] = {k: v for k, v in management_scope.items() if k != 'tickets'}
+        return result
 
     async def emergency_stop(self) -> dict:
         """Pause first, serialize with signal execution, cancel pending orders before closing."""

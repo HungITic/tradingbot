@@ -17,11 +17,12 @@ from telethon import TelegramClient, events
 
 from app.config.settings import settings
 from app.trading.service import TradingService, trading_service
+from app.telegram.reply_chain import ReplyChainMixin, ReplyChainError
 
 logger = structlog.get_logger(__name__)
 
 
-class TelegramSignalListener:
+class TelegramSignalListener(ReplyChainMixin):
     """Telethon userbot that listens to signal channels."""
 
     def __init__(self, service: TradingService | None = None) -> None:
@@ -82,20 +83,7 @@ class TelegramSignalListener:
                 reply_to_msg_id = getattr(event.reply_to, "reply_to_msg_id", None)
 
             try:
-                if event.is_reply:
-                    if reply_to_msg_id is None:
-                        reply_msg = await event.get_reply_message()
-                        if reply_msg:
-                            reply_to_msg_id = reply_msg.id
-
-                    from app.signal.models import ManagementType
-                    actions = self.service.parser.rule_engine.match_actions(raw_text)
-                    if any(a.action_type == ManagementType.REENTRY for a in actions):
-                        reply_msg = await event.get_reply_message()
-                        if reply_msg and reply_msg.raw_text:
-                            logger.info("reentry_signal_detected", reply_to_id=reply_msg.id)
-                            raw_text = f"{reply_msg.raw_text}\n\n[REENTRY COMMAND]: {raw_text}"
-                            is_reentry = True
+                raw_text, is_reentry, reply_to_msg_id, origin = await self.resolve_reentry(event.message)
 
                 chat = await event.get_chat()
                 username = getattr(chat, "username", None)
@@ -120,7 +108,13 @@ class TelegramSignalListener:
                     message_link=message_link,
                     reply_to_msg_id=reply_to_msg_id,
                     signal_time=event.message.date,
+                    **({'reentry_origin': origin} if origin else {}),
                 )
+            except ReplyChainError as exc:
+                logger.error('reentry_chain_rejected', chat_id=chat_id, message_id=msg_id, error=str(exc))
+                from app.telegram.utils import construct_telegram_message_link
+                link = construct_telegram_message_link(chat_id, msg_id)
+                await self.service.notify(self.service.format_notification(f"⛔ {escape(str(exc))}", link))
             except Exception as e:
                 logger.exception("signal_processing_error", error=str(e), message_id=msg_id)
 
@@ -145,10 +139,11 @@ class TelegramSignalListener:
 
     async def fetch_message_by_link(
         self, link: str
-    ) -> tuple[str, int, int, str, bool, int | None, datetime]:
+    ) -> tuple:
         """
         Fetch message content and metadata from a Telegram link.
         Returns: (raw_text, message_id, chat_id, canonical_link, is_reentry, reply_to_msg_id, sent_at)
+        plus an eighth provenance dict for re-entry commands.
         """
         from app.telegram.utils import construct_telegram_message_link, parse_telegram_message_link
 
@@ -188,24 +183,7 @@ class TelegramSignalListener:
             raise ValueError(f"Tin nhắn #{msg_id} không có nội dung văn bản.")
 
         chat_id = msg.chat_id
-        is_reentry = False
-        reply_to_msg_id = getattr(msg, "reply_to_msg_id", None)
-        if reply_to_msg_id is None and getattr(msg, "reply_to", None):
-            reply_to_msg_id = getattr(msg.reply_to, "reply_to_msg_id", None)
-
-        if msg.is_reply:
-            if reply_to_msg_id is None:
-                reply_msg = await msg.get_reply_message()
-                if reply_msg:
-                    reply_to_msg_id = reply_msg.id
-
-            from app.signal.models import ManagementType
-            actions = self.service.parser.rule_engine.match_actions(raw_text)
-            if any(a.action_type == ManagementType.REENTRY for a in actions):
-                reply_msg = await msg.get_reply_message()
-                if reply_msg and reply_msg.raw_text:
-                    raw_text = f"{reply_msg.raw_text}\n\n[REENTRY COMMAND]: {raw_text}"
-                    is_reentry = True
+        raw_text, is_reentry, reply_to_msg_id, origin = await self.resolve_reentry(msg)
 
         chat = await msg.get_chat()
         username = getattr(chat, "username", None) if chat else (entity if isinstance(entity, str) else None)
@@ -213,7 +191,8 @@ class TelegramSignalListener:
 
         if not isinstance(msg.date, datetime) or msg.date.tzinfo is None:
             raise ValueError("Không xác định được thời gian gốc của tín hiệu")
-        return raw_text, msg_id, chat_id, canonical_link, is_reentry, reply_to_msg_id, msg.date
+        result = (raw_text, msg_id, chat_id, canonical_link, is_reentry, reply_to_msg_id, msg.date)
+        return (*result, origin) if origin else result
 
     async def stop(self) -> None:
         """Gracefully disconnect the Telethon client."""

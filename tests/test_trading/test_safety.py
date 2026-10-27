@@ -330,3 +330,62 @@ async def test_claim_survives_new_service_instance(service, database):
     fresh._process_raw_message.assert_not_awaited()
     await fresh.process_raw_message(SIGNAL, chat_id=11, message_id=20)
     fresh._process_raw_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_replay_skips_only_expiry_in_preview_and_execution(service):
+    old = datetime.now(timezone.utc) - timedelta(days=30)
+    assert not (await service.preview_signal(SIGNAL, signal_time=old))['can_execute']
+    assert (await service.preview_signal(SIGNAL, signal_time=old, skip_signal_expiry_check=True))['can_execute']
+    await service.process_raw_message(SIGNAL, signal_time=old, skip_signal_expiry_check=True)
+    assert service.broker.open_order.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_replay_still_requires_override_for_bad_entry_price(service):
+    old = datetime.now(timezone.utc) - timedelta(days=30)
+    service.broker.get_tick.return_value = TickInfo('XAUUSD', D('2652'), D('2652'), datetime.now(timezone.utc))
+    await service.process_raw_message(SIGNAL, signal_time=old, skip_signal_expiry_check=True)
+    service.broker.open_order.assert_not_awaited()
+    key = next(iter(service._pending_overrides))
+    assert service._pending_overrides[key]['signal_time'] == old
+    assert service._pending_overrides[key]['skip_signal_expiry_check']
+    await service.execute_override_order(key, 'min')
+    assert service.broker.open_order.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_replay_expiry_bypass_does_not_allow_stale_quotes(service):
+    service.broker.get_tick.return_value.time -= timedelta(minutes=3)
+    preview = await service.preview_signal(SIGNAL, signal_time=datetime(2020, 1, 1, tzinfo=timezone.utc),
+                                            skip_signal_expiry_check=True)
+    assert not preview['can_execute']
+    service.broker.open_order.assert_not_awaited()
+
+
+@pytest.mark.parametrize('when,expected', [
+    (datetime.now(timezone.utc) + timedelta(days=1), 'tương lai'),
+    (datetime(2020, 1, 1), 'múi giờ'),
+])
+def test_replay_expiry_bypass_keeps_other_timestamp_validation(service, when, expected):
+    assert expected in service.signal_problem(service.parser.parse(SIGNAL), when, skip_signal_expiry_check=True)
+
+
+@pytest.mark.asyncio
+async def test_replay_expiry_bypass_keeps_sl_validation(service):
+    preview = await service.preview_signal('BUY XAUUSD 2650\nSL: 2660\nTP: 2670',
+        signal_time=datetime(2020, 1, 1, tzinfo=timezone.utc), skip_signal_expiry_check=True)
+    assert not preview['can_execute']
+    service.broker.open_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reentry_provenance_is_saved_with_signal_audit(service, database):
+    from app.models.signal import ParsedSignal as DBParsedSignal
+    origin = {'chat_id': -1001234567890, 'root_message_id': 1, 'message_path': [3, 2, 1],
+              'root_text': SIGNAL, 'command_text': 'vòng 2'}
+    await service.process_raw_message(SIGNAL + '\n\n[REENTRY COMMAND]: vòng 2', is_reentry=True,
+        message_id=3, chat_id=origin['chat_id'], signal_time=datetime.now(timezone.utc), reentry_origin=origin)
+    parsed = next(call.args[0] for call in database.add.call_args_list if isinstance(call.args[0], DBParsedSignal))
+    assert parsed.extra_metadata['reentry_origin'] == origin
+    assert service.broker.open_order.await_count == 2

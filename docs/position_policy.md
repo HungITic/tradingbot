@@ -46,6 +46,10 @@ Bản này thay thế các mô tả cũ về TP1, hòa vốn và chốt một ph
 
 ## Hủy nhánh chờ và từ khóa
 
+- Tin action quản lý vị thế quên reply được giới hạn vào **signal NEW_ORDER gần nhất trước tin action trong cùng chat**, theo message ID Telegram (gồm cả lần vào lại đã tạo NEW_ORDER). Không tìm signal mới hơn khi replay tin cũ, không chọn toàn bộ vị thế cùng symbol. Nếu có symbol trong action nhưng khác symbol của signal gần nhất thì từ chối và yêu cầu reply đúng kèo. Signal gần nhất chưa có order hoặc đã đóng hết → không chuyển sang kèo cũ còn mở.
+- Reply rõ ràng được ưu tiên, tra đúng chat/message. Chỉ thị có “tất cả”/“toàn bộ”/“all” vẫn giữ phạm vi chủ động đó; lệnh Telegram theo ticket không bị đổi. “Vòng 2” mở mới vẫn dùng cơ chế reply-chain riêng. Replay action không reply hiển thị link kèo gần nhất trong xem trước và ghim signal ID khi xác nhận; lúc thực thi đọc lại ticket thuộc đúng signal, lưu phạm vi vào risk audit trước khi gửi MT5. Không cần schema mới.
+- “Vòng 2”/“vào lại” có thể reply qua nhiều tin trung gian. Bot lần đúng chuỗi reply trong cùng chat đến signal mở lệnh hợp lệ gần nhất, tối đa 100 bước và 30 giây. Chỉ tin yêu cầu vòng mới được thực thi, dùng ID/thời gian của chính nó; không xử lý lại các tin trung gian. Áp dụng chung cho listener tự động và `/replay`; replay vẫn có xem trước/xác nhận/duyệt vượt giá như trước.
+- Tin bị xóa, chuỗi đứt/lặp, reply khác chat, không tìm được signal hoặc signal có mức giá không hợp lệ → báo lý do và không gửi MT5. Provenance gồm chat, signal gốc, chuỗi message ID, nội dung gốc và lệnh vòng mới được lưu trong receipt context và metadata parsed signal (không cần schema mới). Sau restart có thể đọc lại liên kết đúng chat/message; bot vẫn đọc và đối chiếu nội dung signal gốc trên Telegram trước khi dùng liên kết đã lưu. Xem trước replay hiển thị link signal gốc và số bước reply.
 - Khi bật chính sách, hủy **Max Entry còn chờ của cùng signal** ngay khi Min Entry có lần chốt thành công đầu tiên: SL, TP/TP1, chốt một phần, đóng tay hoặc đóng từ Telegram. Không cần đợi đóng hết Min Entry. Max Entry đã khớp thành vị thế thì không bị đóng bởi quy tắc này.
 - Liên kết theo mã vị thế gốc và order mở từ broker; không suy đoán từ số trong comment. Lịch sử gom các deal chốt cùng vị thế, giữ từng lần chốt trong chi tiết. Deal chưa có liên kết hoặc không đọc được vị thế hiện tại sẽ hiện trạng thái chưa xác định.
 - Tác vụ đối soát cần thêm bằng chứng deal thoát trong lịch sử 7 ngày; việc không thấy ticket trong danh sách không đủ để kết luận đã đóng.
@@ -57,6 +61,8 @@ Bản này thay thế các mô tả cũ về TP1, hòa vốn và chốt một ph
 - Tác vụ seed không tự bật lại rule mà người dùng đã tắt; dữ liệu rule riêng được giữ lại.
 
 ## Cài đặt
+
+`/replay` (và nạp link Telegram qua bot cá nhân) chỉ bỏ kiểm tra tín hiệu đã hết hạn theo `signal_expire_seconds`. Giữ nguyên xem trước, xác nhận, duyệt vượt giá và các kiểm tra giao dịch; thời gian gốc vẫn được lưu/hiển thị. Các kiểm tra thời gian gốc có múi giờ, thời gian ở tương lai và độ mới của giá thị trường vẫn áp dụng. Tín hiệu tự động vẫn kiểm tra hết hạn như trước.
 
 Mở `/config` và chọn mục cần đổi. Các thay đổi đều có xem trước/xác nhận; lựa chọn policy có nút riêng.
 

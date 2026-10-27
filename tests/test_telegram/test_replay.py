@@ -254,7 +254,7 @@ async def test_cmd_replay_and_raw_link_handling():
     context = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
     context.args = ["https://t.me/MegaLodonGOLDForex/1241"]
     context.user_data = {}
-    signal_time = datetime.now(timezone.utc)
+    signal_time = datetime(2020, 1, 1, tzinfo=timezone.utc)
 
     with patch(
         "app.telegram.signal_listener.signal_listener.fetch_message_by_link",
@@ -280,6 +280,7 @@ async def test_cmd_replay_and_raw_link_handling():
             message_link="https://t.me/MegaLodonGOLDForex/1241",
             reply_to_msg_id=None,
             signal_time=signal_time,
+            skip_signal_expiry_check=True,
         )
         assert status_message.edit_text.called
 
@@ -312,4 +313,5 @@ async def test_cmd_replay_and_raw_link_handling():
             message_link="https://t.me/MegaLodonGOLDForex/1241",
             reply_to_msg_id=None,
             signal_time=signal_time,
+            skip_signal_expiry_check=True,
         )

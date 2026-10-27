@@ -73,9 +73,12 @@ async def test_expired_or_cancelled_signal_preview_never_executes(bot):
 
 
 @pytest.mark.asyncio
-async def test_confirm_signal_routes_through_checks_once(bot):
+@pytest.mark.parametrize('replay', [False, True])
+async def test_confirm_signal_routes_through_checks_once(bot, replay):
     update, context = callback()
     payload = {'raw_text': 'BUY GOLD', 'signal_time': datetime.now(timezone.utc)}
+    if replay:
+        payload['skip_signal_expiry_check'] = True
     token = bot.new_draft('signal', payload)
     await bot.handle_console_callback(update, context, f'draft_ok_{token}')
     await bot.handle_console_callback(update, context, f'draft_ok_{token}')
