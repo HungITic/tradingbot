@@ -746,8 +746,13 @@ class TradingService(SlippageLimitMixin, ManagementScopeMixin, NativeTPMixin, Cl
                             .on_conflict_do_nothing()
                             .returning(SignalReceipt.message_id))
                         claimed = result.scalar_one_or_none()
+                        if claimed is None and kwargs.get('skip_signal_expiry_check'):
+                            from app.trading.replay import reclaim_unexecuted_message
+                            retry_context = {k: str(v) if isinstance(v, datetime) else v for k, v in kwargs.items()}
+                            if await reclaim_unexecuted_message(session, chat_id, message_id, raw_text, retry_context):
+                                claimed = message_id
                     if claimed is None:
-                        await self.notify("⛔ Tin nhắn này đã được xử lý hoặc đang chờ duyệt; không thực thi lại.")
+                        await self.notify("⛔ Tin nhắn đã có yêu cầu giao dịch, đang chờ duyệt hoặc chưa đủ dữ liệu xác nhận an toàn; không thực thi lại.")
                         return
                 except Exception as exc:
                     logger.error("signal_claim_failed", error=str(exc))

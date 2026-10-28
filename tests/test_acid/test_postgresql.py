@@ -180,6 +180,24 @@ async def test_durable_claim_includes_original_message_and_only_one_winner(pg):
 
 
 @pytest.mark.asyncio
+async def test_concurrent_replay_reclaims_only_one_safe_attempt(pg):
+    from app.models.signal import Signal
+    from app.trading.replay import reclaim_unexecuted_message
+    async with database.get_session() as session:
+        source = SignalSource(name='retry', chat_id=42)
+        session.add(source)
+        await session.flush()
+        session.add(Signal(source_id=source.id, telegram_message_id=2,
+                           raw_message='BUY', status='REJECTED'))
+        session.add(SignalReceipt(chat_id=42, message_id=2, raw_message='BUY'))
+    async def retry():
+        async with database.get_session() as session:
+            return await reclaim_unexecuted_message(session, 42, 2, 'BUY', {})
+    outcomes = await asyncio.gather(*(retry() for _ in range(10)))
+    assert outcomes.count(True) == 1
+
+
+@pytest.mark.asyncio
 async def test_second_application_is_rejected_and_lost_lease_blocks_sending(pg):
     first = await database.acquire_application_lock()
     try:

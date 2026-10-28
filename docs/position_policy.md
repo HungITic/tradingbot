@@ -72,6 +72,8 @@ Bản này thay thế các mô tả cũ về TP1, hòa vốn và chốt một ph
 
 `/replay` (và nạp link Telegram qua bot cá nhân) chỉ bỏ kiểm tra tín hiệu đã hết hạn theo `signal_expire_seconds`. Giữ nguyên xem trước, xác nhận, duyệt vượt giá và các kiểm tra giao dịch; thời gian gốc vẫn được lưu/hiển thị. Các kiểm tra thời gian gốc có múi giờ, thời gian ở tương lai và độ mới của giá thị trường vẫn áp dụng. Tín hiệu tự động vẫn kiểm tra hết hạn như trước.
 
+Replay có thể thử lại tin đã được ghi nhận nếu mọi lần xử lý trước đều kết thúc ở UNKNOWN, REJECTED, SKIPPED hoặc EXPIRED, không có order, broker command, management action hay yêu cầu hủy limit của tin đó. Tin đã thực thi, đang chờ duyệt, đang xử lý, thiếu nhật ký hoặc có kết quả chưa rõ vẫn bị chặn. Việc thử lại khóa receipt và ghi mốc lần xử lý trước trong cùng transaction; nếu bot dừng trước khi tạo nhật ký lần mới thì không tự dùng lại mốc cũ. Listener tự động vẫn chống trùng như trước; không cần migration SQL.
+
 Mở `/config` và chọn mục cần đổi. Các thay đổi đều có xem trước/xác nhận; lựa chọn policy có nút riêng.
 
 | Tham số | Mặc định | Ý nghĩa |
