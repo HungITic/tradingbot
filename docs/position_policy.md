@@ -14,6 +14,14 @@ Bản này thay thế các mô tả cũ về TP1, hòa vốn và chốt một ph
 - `/breakeven <ticket>` vẫn là lệnh thực thi trực tiếp, nhưng trả giá SL thực tế và kết quả.
 - Tin `XAUUSD dời SL về 2662` dùng đúng giá 2662; không tự đổi thành hòa vốn. Chỉ thị giá đích rõ ràng được xem là can thiệp chủ động, không bị ràng buộc bởi lựa chọn “chỉ cải thiện” của SL tự động.
 
+## Trượt giá và limit chưa khớp
+
+- Trượt **bất lợi lớn hơn** `max_slippage_entry`: tự đặt BUY_LIMIT/SELL_LIMIT tại Min Entry của signal, không chờ xác nhận trượt giá. Nếu có nhánh Max Entry thì vẫn đặt limit ở Max Entry như thường lệ. Trong ngưỡng hoặc trượt có lợi thì giữ hành vi market hiện có; giá có lợi vượt cả vùng entry vẫn có cơ chế duyệt riêng.
+- Tổng lot, SL/TP sau bù 0.5 và cách chia TP1/TP2 giữ nguyên. Một limit nhánh có thể gồm hai lệnh chờ MT5. Giới hạn số lệnh, lỗ ngày, trùng tín hiệu và các chặn khác vẫn được kiểm tra/duyệt như trước.
+- Khi có **action được parser nhận diện** liên quan đến signal đã tạo limit do trượt giá (chốt bớt, chốt entry xấu, đóng lệnh, dời SL, hòa vốn, vào lại), bot hủy các limit đó còn chờ. Quan hệ dùng reply trực tiếp/chuỗi reply trong đúng chat; action không reply dùng signal mở lệnh gần nhất trước action, giống phạm vi quản lý vị thế. Không hủy limit của kèo cũ khác hoặc vì một tin chào/cập nhật không được nhận diện là action. Phần đã khớp giữ nguyên và vẫn được xử lý theo action bình thường.
+- Chính sách limit do trượt được lưu vào metadata signal trước khi đặt lệnh. Ý định hủy được commit vào risk audit trước khi gửi MT5; sync kiểm tra lại mỗi vòng và khôi phục việc hủy sau restart. Chỉ hủy ticket còn nằm trong pending snapshot, không dùng lệnh đóng vị thế thay thế khi limit đã khớp. Hủy thất bại được thử lại; kết quả không rõ thì dừng mở mới và giữ command journal để đối soát.
+- Áp dụng cho lệnh mới có dấu chính sách này, không tự suy đoán hoặc hủy các limit cũ. Dùng JSON metadata/risk audit sẵn có nên không cần migration SQL. `/replay` vẫn xem trước/xác nhận, hiển thị việc sẽ hủy limit; không hủy khi mới xem trước.
+
 ## TP và chốt một phần
 
 - **Lệnh mới có TP1 và TP2, tài khoản hedging:** mỗi nhánh entry được chia theo `default_partial_close_percent` lúc mở. Ví dụ 1.5 lot và 30% → 0.45 lot gắn TP1, 1.05 lot gắn TP2, cùng SL. Cả nhánh market và nhánh pending đều dùng TP trực tiếp phía broker. Hai phần là hai vị thế MT5 nhưng được gom thành một nhánh trong phần vị thế và lịch sử Telegram.

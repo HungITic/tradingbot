@@ -46,9 +46,10 @@ from app.trading.position_policy import PositionPolicyMixin
 from app.trading.close_reporting import CloseReportingMixin
 from app.trading.native_tp import NativeTPMixin, branch_comment, native_comment
 from app.trading.management_scope import ManagementScopeMixin
+from app.trading.slippage_limits import SlippageLimitMixin
 
 
-class TradingService(ManagementScopeMixin, NativeTPMixin, CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixin):
+class TradingService(SlippageLimitMixin, ManagementScopeMixin, NativeTPMixin, CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixin):
     """Core trade coordinator and order router."""
 
     def __init__(
@@ -255,6 +256,8 @@ class TradingService(ManagementScopeMixin, NativeTPMixin, CloseReportingMixin, P
                 _is_first_sync = False
 
                 # Evaluate TP1 and TP2 milestones for open positions
+                async with self._execution_lock:
+                    await self.cancel_invalidated_slippage_limits()
                 await self._check_tp_milestones()
 
                 # Reconcile dual-entry pending orders (cancel remaining limit if sibling closed)
@@ -387,6 +390,8 @@ class TradingService(ManagementScopeMixin, NativeTPMixin, CloseReportingMixin, P
             messages = []
             successes = 0
             partial_branch = False
+            if entry.get('slippage_limit'):
+                await self.mark_slippage_limit(entry.get('db_id'))
             for req in prepared:
                 if not self.risk_config.enabled:
                     messages.append("⛔ Bot đã tạm dừng; không gửi thêm lệnh.")
@@ -767,6 +772,7 @@ class TradingService(ManagementScopeMixin, NativeTPMixin, CloseReportingMixin, P
         skip_signal_expiry_check: bool = False,
         reentry_origin: dict | None = None,
         management_scope: dict | None = None,
+        related_message_path: list[int] | None = None,
     ) -> None:
         """Full pipeline: Raw message -> Parse -> Risk -> Execute -> Notify."""
         logger.info(
@@ -855,6 +861,8 @@ class TradingService(ManagementScopeMixin, NativeTPMixin, CloseReportingMixin, P
             await self.set_signal_status(signal_db_id, "REJECTED", problem)
             await self.notify(self.format_notification(f"⛔ <b>Signal Rejected</b>\n{escape(problem)}", message_link))
             return
+        cancelled_limits = await self.invalidate_slippage_limits(signal, chat_id, message_id, reply_to_msg_id,
+            related_message_path or (reentry_origin or {}).get('message_path'), management_scope, is_reentry)
         context = await self.build_risk_context()
 
         # 2. New Order Flow
@@ -889,6 +897,8 @@ class TradingService(ManagementScopeMixin, NativeTPMixin, CloseReportingMixin, P
                 and max_entry is not None
                 and max_entry != min_entry
             )
+            adverse_slippage = (current_price - min_entry if action == OrderAction.BUY else min_entry - current_price) if min_entry is not None else Decimal('0')
+            slippage_limit = adverse_slippage > self.risk_config.max_slippage_entry
 
             # Determine pending order type
             def _get_pending_type(act: OrderAction, curr: Decimal, target: Decimal) -> str:
@@ -944,6 +954,7 @@ class TradingService(ManagementScopeMixin, NativeTPMixin, CloseReportingMixin, P
             override_data = {"signal": signal, "signal_time": signal_time, "db_id": signal_db_id,
                              "message_id": message_id, "allowed_rule": None,
                              "skip_signal_expiry_check": skip_signal_expiry_check}
+            override_data['slippage_limit'] = slippage_limit
             decision = self.risk_engine.evaluate(signal, context)
 
             if not decision.approved:
@@ -1021,45 +1032,15 @@ class TradingService(ManagementScopeMixin, NativeTPMixin, CloseReportingMixin, P
                     await self.notify(self.format_notification(warning_msg, message_link), reply_markup=kb)
                     return
 
-            # --- Order 1: Min Entry (Market order with favorable / slippage check) ---
-            slippage = Decimal("0")
-            is_favorable = True
-            if min_entry is not None and current_price is not None:
-                if action == OrderAction.SELL:
-                    if current_price < min_entry:
-                        is_favorable = False
-                        slippage = min_entry - current_price
-                else:
-                    if current_price > min_entry:
-                        is_favorable = False
-                        slippage = current_price - min_entry
-
-            if not is_favorable and slippage > self.risk_config.max_slippage_entry:
-                warning_msg = (
-                    f"⚠️ <b>Cảnh báo Min Entry: Vượt ngưỡng trượt giá</b>\n"
-                    f"━━━━━━━━━━━━━━━━\n"
-                    f"• Cặp: <b>{symbol}</b> ({action.value})\n"
-                    f"• Min Entry: <code>{min_entry}</code> | Hiện tại: <code>{current_price}</code>\n"
-                    f"• Trượt bất lợi: <b>{slippage:.2f} giá</b> (Tối đa: {self.risk_config.max_slippage_entry} giá)\n\n"
-                    f"➡️ <i>Tạm dừng đặt lệnh tự động để bạn quyết định!</i>"
-                )
-                from app.telegram.keyboards import build_override_keyboard
-                self._pending_overrides[sig_id] = {
-                    **override_data,
-                    "orders": pending_reqs,
-                    "message_link": message_link,
-                    "message_id": message_id,
-                }
-                await self.set_signal_status(signal_db_id, "AWAITING_APPROVAL", "Vượt ngưỡng trượt giá")
-                kb = build_override_keyboard(sig_id, has_dual=has_dual_entry)
-                await self.notify(self.format_notification(warning_msg, message_link), reply_markup=kb)
-                return
+            # Adverse slippage waits for a pullback at the source entry, never chases price.
+            if slippage_limit:
+                await self.mark_slippage_limit(signal_db_id)
 
             order_req_1 = OrderRequest(
                 symbol=symbol,
-                order_type=action.value,
+                order_type=action.value + "_LIMIT" if slippage_limit else action.value,
                 volume=vol_min,
-                price=current_price,
+                price=min_entry if slippage_limit else current_price,
                 sl=signal.new_order.stop_loss,
                 tp=signal.new_order.take_profit_2 or signal.new_order.take_profit,
                 tp1=signal.new_order.take_profit,
@@ -1094,14 +1075,17 @@ class TradingService(ManagementScopeMixin, NativeTPMixin, CloseReportingMixin, P
                     sig_id,
                     result_1,
                     order_req_1,
-                    status="FILLED",
+                    status="PLACED" if slippage_limit else "FILLED",
                     message_link=message_link,
                     telegram_message_id=message_id,
                 )
                 entry_label = "(Min Entry)" if has_dual_entry else ""
                 entry_tag = f" {entry_label}" if entry_label else ""
                 now_str = now_vietnam().strftime("%H:%M:%S %d/%m/%Y")
-                msg_1 = execution_card(f"✅ Order Executed{entry_tag}", order_req_1, result_1, now_str)
+                execution_title = 'Limit Placed' if slippage_limit else 'Order Executed'
+                msg_1 = execution_card(f"✅ {execution_title}{entry_tag}", order_req_1, result_1, now_str)
+                if slippage_limit:
+                    msg_1 += f'\nTrượt bất lợi {adverse_slippage} giá: chờ khớp lại tại entry của signal.'
             else:
                 msg_1 = (
                     f"❌ <b>Order Execution Failed {'(Min Entry)' if has_dual_entry else ''}</b>\n"
@@ -1169,8 +1153,10 @@ class TradingService(ManagementScopeMixin, NativeTPMixin, CloseReportingMixin, P
             return
 
         if signal.message_type == MessageType.POSITION_MANAGEMENT:
+            reply_to_msg_id = await self.management_reply_id(chat_id, reply_to_msg_id, related_message_path)
             await self.process_management_signal(signal, signal_db_id, reply_to_msg_id, message_link,
-                chat_id=chat_id, message_id=message_id, management_scope=management_scope)
+                chat_id=chat_id, message_id=message_id, management_scope=management_scope,
+                pre_cancelled_limits=cancelled_limits)
 
     # -------------------------------------------------------------
     # Admin Control Operations (called by Personal Telegram Bot)

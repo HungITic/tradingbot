@@ -241,3 +241,10 @@ async def test_non_reentry_missing_header_keeps_direct_reply_fallback(listener):
     result = await listener.resolve_reentry(current)
     assert result == ('chốt bớt', False, 1, None)
     current.get_reply_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_management_action_resolves_chain_for_limit_invalidation(listener):
+    current = msg(3, 'chốt bớt entry xấu', msg(2, 'cập nhật', msg(1, ROOT)))
+    assert await listener.related_action_path(current) == [3, 2, 1]
+    listener.service.broker.cancel_order.assert_not_awaited()

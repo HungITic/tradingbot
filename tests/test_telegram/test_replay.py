@@ -114,7 +114,7 @@ async def test_notifications_include_message_link(mock_broker):
 
 
 @pytest.mark.asyncio
-async def test_slippage_warning_includes_message_link(mock_broker):
+async def test_slippage_limit_includes_message_link(mock_broker):
     """Test that slippage warnings include the original message link."""
     from datetime import datetime, timezone
 
@@ -128,6 +128,7 @@ async def test_slippage_warning_includes_message_link(mock_broker):
         )
     )
     service = TradingService(broker=mock_broker, risk_config=RiskConfig())
+    service.mark_slippage_limit = AsyncMock()
     notifications = []
 
     async def mock_notify(msg: str, reply_markup=None):
@@ -145,8 +146,9 @@ async def test_slippage_warning_includes_message_link(mock_broker):
         message_link=test_link,
     )
 
-    assert len(notifications) == 1
-    assert "Cảnh báo Min Entry: Vượt ngưỡng trượt giá" in notifications[0]
+    assert len(notifications) == 2
+    assert "Limit Placed" in notifications[0]
+    assert not service._pending_overrides
     assert "🔗 <b>Signal:</b>" in notifications[0]
     assert test_link in notifications[0]
 

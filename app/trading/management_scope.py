@@ -11,6 +11,17 @@ from app.signal.models import ManagementType
 
 
 class ManagementScopeMixin:
+    async def management_reply_id(self, chat_id, reply_id, message_path=None):
+        ancestors = (message_path or [])[1:]
+        if chat_id is None or reply_id is None or not ancestors:
+            return reply_id
+        async with database.get_session() as session:
+            known = set((await session.scalars(select(Signal.telegram_message_id)
+                .join(SignalSource, Signal.source_id == SignalSource.id)
+                .where(SignalSource.chat_id == chat_id, Signal.message_type == 'NEW_ORDER',
+                       Signal.telegram_message_id.in_(ancestors)))).all())
+        return next((mid for mid in ancestors if mid in known), reply_id)
+
     async def resolve_management_scope(self, signal, reply_id, chat_id, message_id, expected=None):
         if reply_id is not None or chat_id is None:
             return None

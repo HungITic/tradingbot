@@ -26,6 +26,29 @@ def reply_id(message):
 
 
 class ReplyChainMixin:
+    async def related_action_path(self, message, origin=None):
+        if origin:
+            return origin['message_path']
+        parsed = self.service.parser.parse(message.raw_text or '')
+        if parsed.message_type != MessageType.POSITION_MANAGEMENT or not parsed.management_actions or not message.is_reply:
+            return None
+        path, current = [message.id], message
+        async with asyncio.timeout(30):
+            for _ in range(MAX_REPLY_HOPS):
+                parent_id = reply_id(current)
+                parent = await current.get_reply_message()
+                if not parent:
+                    if parent_id and parent_id not in path:
+                        path.append(parent_id)  # An exact stored source can still prove this direct edge.
+                    return path
+                if parent.chat_id != message.chat_id or (parent_id and parent.id != parent_id) or parent.id in path:
+                    raise ReplyChainError('Chuỗi reply của action không hợp lệ; chưa thay đổi lệnh')
+                path.append(parent.id)
+                if self.validate_root_signal(parent.raw_text or '', parent.id) or not parent.is_reply:
+                    return path
+                current = parent
+        raise ReplyChainError('Chuỗi reply của action vượt giới hạn 100 bước')
+
     def is_reentry_command(self, text):
         return any(a.action_type == ManagementType.REENTRY
                    for a in self.service.parser.rule_engine.match_actions(text))

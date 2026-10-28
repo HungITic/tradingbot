@@ -84,6 +84,7 @@ class TelegramSignalListener(ReplyChainMixin):
 
             try:
                 raw_text, is_reentry, reply_to_msg_id, origin = await self.resolve_reentry(event.message)
+                related_path = await self.related_action_path(event.message, origin)
 
                 chat = await event.get_chat()
                 username = getattr(chat, "username", None)
@@ -109,6 +110,7 @@ class TelegramSignalListener(ReplyChainMixin):
                     reply_to_msg_id=reply_to_msg_id,
                     signal_time=event.message.date,
                     **({'reentry_origin': origin} if origin else {}),
+                    **({'related_message_path': related_path} if related_path else {}),
                 )
             except ReplyChainError as exc:
                 logger.error('reentry_chain_rejected', chat_id=chat_id, message_id=msg_id, error=str(exc))
@@ -184,6 +186,7 @@ class TelegramSignalListener(ReplyChainMixin):
 
         chat_id = msg.chat_id
         raw_text, is_reentry, reply_to_msg_id, origin = await self.resolve_reentry(msg)
+        related_path = await self.related_action_path(msg, origin)
 
         chat = await msg.get_chat()
         username = getattr(chat, "username", None) if chat else (entity if isinstance(entity, str) else None)
@@ -192,7 +195,7 @@ class TelegramSignalListener(ReplyChainMixin):
         if not isinstance(msg.date, datetime) or msg.date.tzinfo is None:
             raise ValueError("Không xác định được thời gian gốc của tín hiệu")
         result = (raw_text, msg_id, chat_id, canonical_link, is_reentry, reply_to_msg_id, msg.date)
-        return (*result, origin) if origin else result
+        return (*result, origin) if origin else (*result, None, related_path) if related_path else result
 
     async def stop(self) -> None:
         """Gracefully disconnect the Telethon client."""

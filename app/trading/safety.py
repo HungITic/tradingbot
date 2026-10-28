@@ -125,10 +125,15 @@ class TradingSafetyMixin:
                     tick = await self.checked_tick(order.symbol)
                     price = tick.ask if order.action == OrderAction.BUY else tick.bid
                     lines.append(field("Giá hiện tại", number(price, minimum=2), code=True))
-                    req = OrderRequest(order.symbol, order.action.value, volumes[0], price,
+                    adverse = (price - order.entry_min if order.action == OrderAction.BUY else order.entry_min - price) if order.entry_min is not None else 0
+                    use_limit = adverse > self.risk_config.max_slippage_entry
+                    req = OrderRequest(order.symbol, order.action.value + '_LIMIT' if use_limit else order.action.value,
+                                       volumes[0], order.entry_min if use_limit else price,
                                        order.stop_loss, order.take_profit_2 or order.take_profit,
                                        order.take_profit, order.take_profit_2, comment='bot-market')
                     problem = self.check_request(req)
+                    if use_limit:
+                        lines.append(f'Trượt giá {number(adverse)}: tự đặt {req.order_type} tại {display_price(req.price)}, không chờ duyệt trượt giá.')
                     for volume in volumes:
                         from dataclasses import replace
                         legs = await self.prepare_native_orders(replace(req, volume=volume))
@@ -138,10 +143,11 @@ class TradingSafetyMixin:
                     problem = str(exc)
             can_execute = not problem
             lines.extend(["", DIVIDER, "", self.management_policy_description(), ""])
-            lines.append("Khi thực thi, bot kiểm tra lại giá và có thể yêu cầu duyệt nếu vượt vùng/trượt giá.")
+            lines.append("Khi thực thi, bot kiểm tra lại giá. Trượt bất lợi quá ngưỡng tự đặt limit tại entry; các giới hạn rủi ro khác vẫn có thể yêu cầu duyệt.")
         else:
             lines.append("Quản lý vị thế: " + ", ".join(a.action_type.value for a in signal.management_actions))
             reply_id = kwargs.get("reply_to_msg_id")
+            reply_id = await self.management_reply_id(kwargs.get('chat_id'), reply_id, kwargs.get('related_message_path'))
             positions = await self.get_open_positions()
             pending_scope = []
             try:
@@ -182,7 +188,16 @@ class TradingSafetyMixin:
             lines.append(f"Phạm vi: {len(positions)} vị thế theo bộ lọc {escape(signal.symbol or 'reply/toàn tài khoản')}")
             if pending_scope:
                 lines.append(f'Có {len(pending_scope)} lệnh chờ thuộc kèo trong phạm vi đóng.')
-            problem = problem or (None if positions or pending_scope else "Không có vị thế phù hợp")
+            limit_cancellations = []
+            if not problem:
+                try:
+                    limit_cancellations = await self.preview_slippage_cancellations(signal, kwargs.get('chat_id'),
+                        kwargs.get('message_id'), reply_id, kwargs.get('related_message_path'), management_scope)
+                    if limit_cancellations:
+                        lines.append(f'Action này sẽ hủy {len(limit_cancellations)} limit trượt giá chưa khớp của kèo.')
+                except Exception as exc:
+                    problem = str(exc)
+            problem = problem or (None if positions or pending_scope or limit_cancellations else "Không có vị thế phù hợp")
             if any(a.target == "MIN_ENTRY" for a in signal.management_actions) and positions:
                 try:
                     orders = await self.position_orders(positions)

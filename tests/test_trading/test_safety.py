@@ -96,9 +96,9 @@ async def test_new_order_levels_shift_in_preview_execution_and_audit(service, da
 
 @pytest.mark.asyncio
 async def test_override_does_not_apply_level_offset_twice(service):
-    # A worse quote pauses execution for approval.
-    service.broker.get_tick.return_value = TickInfo('XAUUSD', D('2652'), D('2652'), datetime.now(timezone.utc))
-    await service.process_raw_message(SIGNAL)
+    # A favorable quote beyond the entire dual-entry range still requires approval.
+    service.broker.get_tick.return_value = TickInfo('XAUUSD', D('2646'), D('2646'), datetime.now(timezone.utc))
+    await service.process_raw_message(SIGNAL.replace("2650\n", "2650 - 2648\n"))
     service.broker.open_order.assert_not_awaited()
     key = next(iter(service._pending_overrides))
     await service.execute_override_order(key, 'min')
@@ -344,8 +344,8 @@ async def test_replay_skips_only_expiry_in_preview_and_execution(service):
 @pytest.mark.asyncio
 async def test_replay_still_requires_override_for_bad_entry_price(service):
     old = datetime.now(timezone.utc) - timedelta(days=30)
-    service.broker.get_tick.return_value = TickInfo('XAUUSD', D('2652'), D('2652'), datetime.now(timezone.utc))
-    await service.process_raw_message(SIGNAL, signal_time=old, skip_signal_expiry_check=True)
+    service.broker.get_tick.return_value = TickInfo('XAUUSD', D('2646'), D('2646'), datetime.now(timezone.utc))
+    await service.process_raw_message(SIGNAL.replace("2650\n", "2650 - 2648\n"), signal_time=old, skip_signal_expiry_check=True)
     service.broker.open_order.assert_not_awaited()
     key = next(iter(service._pending_overrides))
     assert service._pending_overrides[key]['signal_time'] == old

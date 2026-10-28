@@ -33,6 +33,7 @@ CONFIG_SECTIONS = {
 
 
 CONFIG_HELP = {
+    "max_slippage_entry": "Mức trượt giá bất lợi tối đa để vào market. Vượt mức này: tự đặt BUY_LIMIT/SELL_LIMIT tại entry signal, không chờ duyệt trượt giá. Có action liên quan đến kèo thì hủy các limit đó còn chờ; không đóng phần đã khớp.",
     "default_partial_close_percent": "Tỷ lệ TP1 của lệnh mới được dùng để chia lot ngay khi mở; TP1/TP2 chạy trên MT5. Đổi tỷ lệ không tự chia lại lệnh đang mở. Tỷ lệ này cũng dùng cho chốt chung; entry xấu có tỷ lệ riêng.",
     "bad_entry_partial_close_percent": "Chỉ áp dụng cho tin có ‘chốt bớt’ và ‘xấu’: chốt phần trăm khối lượng còn lại của Min Entry. Nhập từ 0 đến 100: 0 bỏ qua chốt, 100 đóng hết Min Entry. Phần trăm ghi rõ trong tin được ưu tiên; TP1 và chốt chung dùng tỷ lệ riêng.",
     "min_lot": "Giới hạn dưới cho mỗi lệnh. Lot mặc định và cả hai nhánh phải nằm trong khoảng min/max.",

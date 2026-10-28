@@ -208,7 +208,7 @@ async def test_service_acceptable_slippage_executes_market_order(mock_broker):
 
 
 @pytest.mark.asyncio
-async def test_service_excessive_slippage_skips_market_order_and_warns(mock_broker):
+async def test_service_excessive_slippage_automatically_places_limits(mock_broker):
     from datetime import datetime, timezone
     # SELL 4148, current price is 4146.5 (unfavorable by 1.5 > max_slippage 1.0)
     mock_broker.get_tick = AsyncMock(
@@ -220,17 +220,18 @@ async def test_service_excessive_slippage_skips_market_order_and_warns(mock_brok
         )
     )
     service = TradingService(broker=mock_broker, risk_config=RiskConfig())
+    service.mark_slippage_limit = AsyncMock()
     notifications = []
     service.set_notification_callback(lambda msg: notifications.append(msg))
 
     raw_signal = "Sell #XAU 4148 - 4160\nSL: 4170\nTP: Trên 200pips"
     await service.process_raw_message(raw_signal)
 
-    # When excessive slippage, execution is paused for user decision (0 orders placed automatically)
-    assert mock_broker.open_order.call_count == 0
-
-    # Warning alert must be in notifications
-    assert any("Cảnh báo Min Entry: Vượt ngưỡng trượt giá" in n for n in notifications)
+    assert mock_broker.open_order.call_count == 2
+    requests = [call.args[0] for call in mock_broker.open_order.call_args_list]
+    assert [(r.order_type, r.price) for r in requests] == [('SELL_LIMIT', Decimal('4148')), ('SELL_LIMIT', Decimal('4160'))]
+    assert not service._pending_overrides
+    assert any('Limit Placed' in n for n in notifications)
 
 
 @pytest.mark.asyncio

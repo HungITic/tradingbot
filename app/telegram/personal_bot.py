@@ -1050,8 +1050,10 @@ class PersonalTelegramBot(TelegramConsoleMixin):
                        "chat_id": chat_id, "message_link": canonical_link,
                        "reply_to_msg_id": reply_to_msg_id, "signal_time": signal_time,
                        "skip_signal_expiry_check": True}
-            if len(fetch_res) > 7:
+            if len(fetch_res) > 7 and fetch_res[7] is not None:
                 payload['reentry_origin'] = fetch_res[7]
+            if len(fetch_res) > 8:
+                payload['related_message_path'] = fetch_res[8]
             preview = await self.service.preview_signal(**payload)
             if preview.get('management_scope'):
                 payload['management_scope'] = preview['management_scope']

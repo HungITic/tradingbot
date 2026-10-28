@@ -32,6 +32,7 @@ class PositionPolicyMixin:
                 f"Tự dời SL sau chốt: {'bật' if cfg.auto_breakeven_on_partial else 'tắt'}.\n"
                 "Không đủ lot để tách: từ chối mở nhánh. Chính sách thiếu lot TP1 chỉ dùng cho lệnh cũ.\n"
                 "Chỉ có một TP: đóng toàn bộ tại TP đó.\n"
+                "Trượt giá bất lợi quá ngưỡng: tự đặt limit tại entry. Có action liên quan thì hủy phần limit đó còn chờ.\n"
                 f"\n<b>QUẢN LÝ NHÁNH</b>\nChốt bớt + xấu: chốt {cfg.bad_entry_partial_close_percent}% Min Entry, giữ Max Entry.\n"
                 f"Chốt bớt chung dùng tỷ lệ cấu hình: {'bật' if cfg.generic_partial_uses_default else 'tắt'}.\n"
                 f"Hủy Max Entry còn chờ khi Min Entry có lần chốt: {'bật' if cfg.auto_cancel_pending_on_full_close else 'tắt'}.\n"
@@ -369,7 +370,7 @@ class PositionPolicyMixin:
                 or (groups.get(p.ticket), p.symbol, p.position_type) in scopes]
 
     async def process_management_signal(self, signal, signal_id, reply_id, link, *,
-                                        chat_id=None, message_id=None, management_scope=None):
+                                        chat_id=None, message_id=None, management_scope=None, pre_cancelled_limits=None):
         positions = await self.get_open_positions()
         pending = []
         try:
@@ -415,6 +416,9 @@ class PositionPolicyMixin:
             await self.notify("⛔ Cần symbol, reply đúng kèo hoặc chỉ rõ 'tất cả'.")
             return
         if not positions and not pending:
+            if pre_cancelled_limits:
+                await self.set_signal_status(signal_id, 'EXECUTED', 'Đã hủy limit chưa khớp do action cập nhật')
+                return
             await self.set_signal_status(signal_id, "SKIPPED", "Các vị thế đã được đóng trước đó")
             await self.notify(f"ℹ️ {reply_tag}: các lệnh đã được đóng trước đó hoặc không còn vị thế phù hợp.")
             return
