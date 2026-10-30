@@ -32,6 +32,46 @@ def callback():
     return SimpleNamespace(callback_query=query), SimpleNamespace(user_data={})
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('tail,percentage,allow', [('30 repeat=true', D('30'), True),
+    ('repeat=false 40%', D('40'), False), ('repeat=true', None, True), ('0 repeat=false', D('0'), False)])
+async def test_rule_command_saves_percentage_and_repeat_together(bot, tail, percentage, allow):
+    message = SimpleNamespace(text='/rule add "chốt bớt entry xấu" PARTIAL_CLOSE ' + tail,
+                              reply_text=AsyncMock())
+    bot.service.add_or_update_management_rule = AsyncMock(return_value=True)
+    await bot.cmd_rule.__wrapped__(bot, SimpleNamespace(message=message), SimpleNamespace())
+    bot.service.add_or_update_management_rule.assert_awaited_once_with(
+        keyword='chốt bớt entry xấu', action_type_str='PARTIAL_CLOSE', percentage=percentage,
+        target=None, allow_repeat=allow)
+    assert ('Chốt tiếp: bật' if allow else 'Chốt tiếp: tắt') in message.reply_text.call_args.args[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('command', [
+    '/rule add "chốt bớt" PARTIAL_CLOSE 30 repeat=maybe',
+    '/rule add "chốt bớt" PARTIAL_CLOSE 30 repeat=false repeat=true',
+    '/rule add "chốt bớt" PARTIAL_CLOSE 30 repeet=true',
+    '/rule add "đóng hết" CLOSE repeat=true',
+])
+async def test_rule_command_rejects_bad_repeat_options_without_saving(bot, command):
+    message = SimpleNamespace(text=command, reply_text=AsyncMock())
+    bot.service.add_or_update_management_rule = AsyncMock()
+    await bot.cmd_rule.__wrapped__(bot, SimpleNamespace(message=message), SimpleNamespace())
+    bot.service.add_or_update_management_rule.assert_not_awaited()
+    assert '❌' in message.reply_text.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_rules_list_displays_explicit_repeat_permission(bot):
+    from app.signal.models import ManagementType
+    bot.service.parser.rule_engine.add_or_update_rule('chốt bớt entry xấu', ManagementType.PARTIAL_CLOSE,
+        {'percentage': D('30'), 'allow_repeat': True})
+    message = SimpleNamespace(reply_text=AsyncMock())
+    await bot.cmd_rules.__wrapped__(bot, SimpleNamespace(effective_message=message), SimpleNamespace(args=[]))
+    text = message.reply_text.call_args.args[0]
+    assert 'chốt bớt entry xấu' in text and 'Chốt tiếp: bật' in text and 'repeat=true' in text
+
+
 def position(ticket, volume='.02'):
     return PositionInfo(ticket, 'XAUUSD', D(volume), D('2650'), D('2655'), D('2640'), D('2670'), D('5'), D('0'), D('0'), 'BUY', datetime.now(timezone.utc))
 

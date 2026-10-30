@@ -834,13 +834,18 @@ class PersonalTelegramBot(TelegramConsoleMixin):
                     param_str = f"({r.default_params['target']})"
 
                 action_name = r.action_type.value if hasattr(r.action_type, "value") else str(r.action_type)
-                lines.append(f"• <code>{r.keyword}</code> ➔ <b>{action_name}</b> {param_str}")
+                if action_name == 'PARTIAL_CLOSE':
+                    repeat = r.default_params.get('allow_repeat')
+                    param_str += ' · Chốt tiếp: ' + ('bật' if repeat is True else 'tắt' if repeat is False else 'theo cấu hình chung')
+                lines.append(f"• <code>{escape(r.keyword)}</code> ➔ <b>{action_name}</b> {escape(param_str)}")
 
             lines.extend([
                 "\n"
                 "💡 <b>Lệnh thao tác:</b>\n"
                 "• Thêm/sửa: <code>/rule add &lt;từ khóa&gt; &lt;ACTION&gt; [params]</code>\n"
                 "  <i>VD:</i> <code>/rule add \"cắt bớt\" PARTIAL_CLOSE 50</code>\n"
+                "  <i>Cho phép chốt tiếp:</i> <code>/rule add \"chốt bớt entry xấu\" PARTIAL_CLOSE 30 repeat=true</code>\n"
+                "  <i>Chặn chốt tiếp:</i> dùng <code>repeat=false</code>; bỏ tham số sẽ giữ quyền đã lưu hoặc theo cấu hình chung.\n"
                 "  <i>VD:</i> <code>/rule add \"về hòa\" BREAKEVEN</code>\n"
                 "  <i>VD:</i> <code>/rule add \"chốt sạch\" CLOSE</code>\n"
                 "• Xóa: <code>/rule del &lt;từ khóa&gt;</code>\n"
@@ -868,7 +873,8 @@ class PersonalTelegramBot(TelegramConsoleMixin):
             await update.message.reply_text(
                 "⚠️ <b>Cú pháp quản lý từ khóa:</b>\n"
                 ""
-                "• Thêm: <code>/rule add &lt;từ khóa&gt; &lt;ACTION&gt; [params]</code>\n"
+                "• Thêm: <code>/rule add &lt;từ khóa&gt; &lt;ACTION&gt; [params] [repeat=true|false]</code>\n"
+                "• Ví dụ: <code>/rule add \"chốt bớt entry xấu\" PARTIAL_CLOSE 30 repeat=true</code>\n"
                 "• Xóa: <code>/rule del &lt;từ khóa&gt;</code>\n\n"
                 "<i>Xem danh sách: /rules</i>",
                 parse_mode=ParseMode.HTML,
@@ -891,35 +897,54 @@ class PersonalTelegramBot(TelegramConsoleMixin):
             action_type_str = tokens[3].upper()
             percentage = None
             target = None
-
-            if len(tokens) >= 5:
-                val = tokens[4]
-                try:
-                    percentage = Decimal(val.replace("%", ""))
-                except Exception:
-                    target = val.upper()
+            allow_repeat = None
+            try:
+                for val in tokens[4:]:
+                    if '=' in val:
+                        name, value = val.lower().split('=', 1)
+                        if name != 'repeat' or value not in {'true', 'false'} or allow_repeat is not None:
+                            raise ValueError('Tham số repeat phải là true hoặc false, chỉ nhập một lần')
+                        allow_repeat = value == 'true'
+                    else:
+                        try:
+                            amount = Decimal(val.replace('%', ''))
+                        except Exception:
+                            if target is not None:
+                                raise ValueError('Chỉ nhập một target')
+                            target = val.upper()
+                        else:
+                            if percentage is not None:
+                                raise ValueError('Chỉ nhập một tỷ lệ chốt')
+                            percentage = amount
+                if allow_repeat is not None and action_type_str != 'PARTIAL_CLOSE':
+                    raise ValueError('repeat chỉ dùng cho hành động PARTIAL_CLOSE')
+            except ValueError as exc:
+                await update.message.reply_text(f'❌ {escape(str(exc))}', parse_mode=ParseMode.HTML)
+                return
 
             ok = await self.service.add_or_update_management_rule(
                 keyword=keyword,
                 action_type_str=action_type_str,
                 percentage=percentage,
                 target=target,
+                allow_repeat=allow_repeat,
             )
 
             if ok:
                 await update.message.reply_text(
                     f"✅ <b>Đã Lưu Từ Khóa Quản Lý Lệnh</b>\n"
                     f""
-                    f"• Từ khóa: <code>{keyword}</code>\n"
-                    f"• Hành động: <b>{action_type_str}</b>\n"
-                    f"• Tham số: {percentage or target or 'Mặc định'}\n\n"
+                    f"• Từ khóa: <code>{escape(keyword)}</code>\n"
+                    f"• Hành động: <b>{escape(action_type_str)}</b>\n"
+                    f"• Tham số: {escape(str(percentage if percentage is not None else target or 'Mặc định'))}\n"
+                    f"• Chốt tiếp: {'bật' if allow_repeat is True else 'tắt' if allow_repeat is False else 'giữ quyền cũ / theo cấu hình chung'}\n\n"
                     f"<i>Đã cập nhật hệ thống và lưu trữ vào database.</i>",
                     parse_mode=ParseMode.HTML,
                 )
             else:
                 await update.message.reply_text(
-                    f"❌ <b>Hành động không hợp lệ:</b> <code>{action_type_str}</code>\n"
-                    f"Hỗ trợ: PARTIAL_CLOSE, CLOSE, MOVE_SL, BREAKEVEN, REENTRY",
+                    "❌ Không lưu được rule. Kiểm tra hành động, tỷ lệ 0–100 và kết nối database.\n"
+                    "Hỗ trợ: PARTIAL_CLOSE, CLOSE, MOVE_SL, BREAKEVEN, REENTRY",
                     parse_mode=ParseMode.HTML,
                 )
 

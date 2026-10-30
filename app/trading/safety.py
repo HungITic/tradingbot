@@ -222,7 +222,7 @@ class TradingSafetyMixin:
                     lines.append(f"Tỷ lệ chốt thực thi: {self.partial_percentage(action)}%")
                     if self.partial_percentage(action) not in {0, 100}:
                         lines.append('Nếu vị thế đã chốt một phần: ' + ('được phép chốt tiếp theo cấu hình/từ khóa.'
-                                     if self.repeat_partial_allowed(signal.raw_message) else 'bỏ qua vì tin này chưa được phép chốt tiếp.'))
+                                     if self.repeat_partial_allowed(signal.raw_message, action) else 'bỏ qua vì tin này chưa được phép chốt tiếp.'))
                 if action.price is not None:
                     lines.append(f"SL đích được yêu cầu: {action.price}")
             can_execute = not problem

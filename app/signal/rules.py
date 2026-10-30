@@ -26,6 +26,9 @@ class ManagementRuleDefinition:
         self.keyword = keyword.lower().strip()
         self.action_type = action_type
         self.default_params = default_params or {}
+        repeat = self.default_params.get('allow_repeat')
+        if repeat is not None and (type(repeat) is not bool or action_type != ManagementType.PARTIAL_CLOSE):
+            raise ValueError('Quyền chốt tiếp phải là boolean và chỉ dùng cho PARTIAL_CLOSE')
         self.priority = priority
 
     def __repr__(self) -> str:
@@ -172,11 +175,14 @@ class ManagementRuleEngine:
                 action = ParsedManagementAction(
                     action_type=rule.action_type,
                     percentage=pct,
-                    percentage_source="message" if explicit_pct is not None else "rule" if pct is not None else "default",
+                    percentage_source=("message" if explicit_pct is not None else
+                        "rule_explicit" if pct is not None and rule.default_params.get('percentage_explicit') else
+                        "rule" if pct is not None else "default"),
                     target=target,
                     keyword=rule.keyword,
                     price=price,
                     side=side,
+                    allow_repeat=rule.default_params.get('allow_repeat'),
                 )
                 actions.append(action)
 
@@ -184,5 +190,8 @@ class ManagementRuleEngine:
         for action in actions:
             kind = "STOP" if action.action_type in {ManagementType.MOVE_SL, ManagementType.BREAKEVEN} else action.action_type.value
             key = (kind, action.price, action.side, action.percentage, action.target)
-            unique.setdefault(key, action)
+            previous = unique.get(key)
+            # Equivalent triggers must not close twice; an explicit denial wins conflicts.
+            if previous is None or (previous.allow_repeat is None and action.allow_repeat is not None) or action.allow_repeat is False:
+                unique[key] = action
         return list(unique.values())

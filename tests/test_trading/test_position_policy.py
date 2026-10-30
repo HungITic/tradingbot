@@ -457,6 +457,37 @@ async def test_keyword_exception_does_not_enable_manual_repeat_closes(svc):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('allow,already,expected', [(True, True, True), (False, True, False), (False, False, True)])
+async def test_rule_controls_actual_repeat_close_and_its_percentage(svc, allow, already, expected):
+    pos = position(volume='.10')
+    pos.comment = 'bot-min-entry'
+    svc.broker.get_positions.return_value = [pos]
+    svc.position_orders.return_value = {1: SimpleNamespace(signal_id=10,
+        volume=D('.20') if already else D('.10'), comment='bot-min-entry')}
+    svc.management_history.return_value = ({1} if already else set(), set())
+    svc.risk_config.auto_breakeven_on_partial = False
+    svc.risk_config.allow_multiple_partial_closes = not allow
+    svc.risk_config.repeat_partial_close_keywords = ['chốt bớt entry xấu']
+    svc.parser.rule_engine.add_or_update_rule('chốt bớt entry xấu', ManagementType.PARTIAL_CLOSE,
+        {'percentage': D('30'), 'percentage_explicit': True, 'allow_repeat': allow})
+    await svc.process_management_signal(svc.parser.parse('XAUUSD chốt bớt entry xấu'), 20, None, None)
+    assert bool(svc.broker.close_position.await_count) == expected
+    if expected:
+        svc.broker.close_position.assert_awaited_once_with(1, D('.03'))
+
+
+@pytest.mark.asyncio
+async def test_rule_repeat_permission_is_visible_in_preview(svc):
+    svc.broker.get_positions.return_value = [position()]
+    svc.parser.rule_engine.add_or_update_rule('chốt bớt', ManagementType.PARTIAL_CLOSE,
+        {'percentage': D('30'), 'percentage_explicit': True, 'allow_repeat': True})
+    preview = await svc.preview_signal('XAUUSD chốt bớt')
+    assert 'Tỷ lệ chốt thực thi: 30%' in preview['text']
+    assert 'được phép chốt tiếp' in preview['text']
+    svc.broker.close_position.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_unknown_allowlisted_phrase_cannot_create_a_trading_action(svc):
     svc.risk_config.repeat_partial_close_keywords = ['kèo chạy rồi ae']
     preview = await svc.preview_signal('kèo chạy rồi AE')

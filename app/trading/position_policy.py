@@ -37,6 +37,7 @@ class PositionPolicyMixin:
                 "Signal ngược chiều cùng symbol: chốt tiếp 50% lot còn lại của vị thế bot, không phụ thuộc cấu hình chốt lặp.\n"
                 f"Chốt lặp chung: {'bật' if cfg.allow_multiple_partial_closes else 'tắt'}. "
                 f"Từ khóa được chốt tiếp: {escape(', '.join(cfg.repeat_partial_close_keywords) or 'chưa có')}.\n"
+                "Rule có repeat=true/false được ưu tiên hơn cấu hình chốt lặp chung và danh sách ngoại lệ.\n"
                 f"\n<b>QUẢN LÝ NHÁNH</b>\nChốt bớt + xấu: chốt {cfg.bad_entry_partial_close_percent}% Min Entry, giữ Max Entry.\n"
                 f"Chốt bớt chung dùng tỷ lệ cấu hình: {'bật' if cfg.generic_partial_uses_default else 'tắt'}.\n"
                 f"Hủy Max Entry còn chờ khi Min Entry có lần chốt: {'bật' if cfg.auto_cancel_pending_on_full_close else 'tắt'}.\n"
@@ -44,15 +45,18 @@ class PositionPolicyMixin:
                 "SL/TP ban đầu: BUY trừ 0.5, SELL cộng 0.5 so với tín hiệu; không tự chuyển về giữa hai entry.")
 
     def partial_percentage(self, action):
-        if action.target == "MIN_ENTRY" and action.percentage_source != "message":
+        explicit = action.percentage_source in {'message', 'rule_explicit'}
+        if action.target == "MIN_ENTRY" and not explicit:
             return self.risk_config.bad_entry_partial_close_percent
         generic = {"chốt bớt", "chốt bớt 1 phần", "chốt 1 phần", "chốt lãi 1 phần", "chốt bớt lãi"}
         if (self.risk_config.generic_partial_uses_default and action.keyword in generic
-                and action.percentage_source != "message"):
+                and not explicit):
             return self.risk_config.default_partial_close_percent
         return action.percentage if action.percentage is not None else self.risk_config.default_partial_close_percent
 
-    def repeat_partial_allowed(self, raw_message):
+    def repeat_partial_allowed(self, raw_message, action=None):
+        if action is not None and action.allow_repeat is not None:
+            return action.allow_repeat
         if self.risk_config.allow_multiple_partial_closes:
             return True
         text = ' '.join(unicodedata.normalize('NFC', raw_message).casefold().split())
@@ -523,7 +527,7 @@ class PositionPolicyMixin:
                         continue
                     db_order = orders.get(pos.ticket)
                     already = self.position_was_reduced(pos, db_order, partial_history)
-                    if partial and percentage < 100 and already and not self.repeat_partial_allowed(signal.raw_message):
+                    if partial and percentage < 100 and already and not self.repeat_partial_allowed(signal.raw_message, action):
                         await self.notify(f"ℹ️ {reply_tag} · Bỏ qua chốt bớt #{pos.ticket}: Vị thế đã chốt 1 phần trước đó; loại signal này chưa được phép chốt tiếp.")
                         continue
                     if partial:
@@ -536,7 +540,8 @@ class PositionPolicyMixin:
                     outcomes.append(result.success)
                     if result.success and volume == pos.volume and result.retcode != 10010:
                         closed_tickets.add(pos.ticket)
-                    await self.record_management(signal_id, pos, action.action_type.value, result, volume=str(volume), target=action.target)
+                    await self.record_management(signal_id, pos, action.action_type.value, result, volume=str(volume), target=action.target,
+                                                 keyword=action.keyword, allow_repeat=action.allow_repeat)
                     label = f"Chốt {percentage.normalize():f}%" if partial else "Đóng lệnh"
                     if action.target == "MIN_ENTRY":
                         label += " Min Entry (entry xấu)"

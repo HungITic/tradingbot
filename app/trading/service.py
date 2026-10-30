@@ -1790,10 +1790,10 @@ class TradingService(SlippageLimitMixin, ManagementScopeMixin, NativeTPMixin, Cl
 
     async def add_or_update_management_rule(
         self, keyword: str, action_type_str: str, percentage: Decimal | None = None,
-        target: str | None = None, priority: int = 5,
+        target: str | None = None, priority: int = 5, allow_repeat: bool | None = None,
     ) -> bool:
         async with self._execution_lock:
-            return await self._add_or_update_management_rule(keyword, action_type_str, percentage, target, priority)
+            return await self._add_or_update_management_rule(keyword, action_type_str, percentage, target, priority, allow_repeat)
 
     async def _add_or_update_management_rule(
         self,
@@ -1802,6 +1802,7 @@ class TradingService(SlippageLimitMixin, ManagementScopeMixin, NativeTPMixin, Cl
         percentage: Decimal | None = None,
         target: str | None = None,
         priority: int = 5,
+        allow_repeat: bool | None = None,
     ) -> bool:
         """Add or update a management rule in memory and persist to DB."""
         clean_kw = keyword.lower().strip()
@@ -1810,10 +1811,19 @@ class TradingService(SlippageLimitMixin, ManagementScopeMixin, NativeTPMixin, Cl
             action_type = ManagementType(action_type_str.upper().strip())
         except ValueError:
             return False
+        if not clean_kw or len(clean_kw) > 100:
+            return False
+        if allow_repeat is not None and (type(allow_repeat) is not bool or action_type != ManagementType.PARTIAL_CLOSE):
+            return False
+        if percentage is not None and (not percentage.is_finite() or not 0 <= percentage <= 100):
+            return False
 
         params: dict[str, Any] = {}
         if percentage is not None:
             params["percentage"] = percentage
+            params['percentage_explicit'] = True
+        if allow_repeat is not None:
+            params['allow_repeat'] = allow_repeat
         if target is not None:
             params["target"] = target
         elif action_type in (ManagementType.MOVE_SL, ManagementType.BREAKEVEN):
@@ -1827,6 +1837,9 @@ class TradingService(SlippageLimitMixin, ManagementScopeMixin, NativeTPMixin, Cl
             async with get_session() as session:
                 stmt = select(ManagementRule).where(ManagementRule.keyword == clean_kw)
                 existing = (await session.execute(stmt)).scalar_one_or_none()
+                if (allow_repeat is None and action_type == ManagementType.PARTIAL_CLOSE
+                        and existing and type((existing.parameters or {}).get('allow_repeat')) is bool):
+                    params['allow_repeat'] = existing.parameters['allow_repeat']
                 db_params = {k: float(v) if isinstance(v, Decimal) else v for k, v in params.items()}
                 if existing:
                     existing.action_type = action_type.value

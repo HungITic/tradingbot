@@ -8,7 +8,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 
 class MessageType(str, Enum):
@@ -55,6 +55,7 @@ class ParsedManagementAction(BaseModel):
     percentage_source: str = "default"
     side: OrderAction | None = None
     keyword: str = ""  # The keyword that triggered this action
+    allow_repeat: StrictBool | None = None  # None inherits the existing repeat policy.
 
 
 class ParsedSignal(BaseModel):
