@@ -955,6 +955,12 @@ class TradingService(SlippageLimitMixin, ManagementScopeMixin, NativeTPMixin, Cl
                 await self.set_signal_status(signal_db_id, "REJECTED", str(exc))
                 await self.notify(self.format_notification(f"⛔ {escape(str(exc))}", message_link))
                 return
+            if self.risk_config.enabled and context.broker_connected:
+                reduced = await self.close_opposite_signal_half(signal.new_order, signal_db_id, message_link)
+                if reduced is False:
+                    return
+                if reduced is True:
+                    context = await self.build_risk_context()
             context.planned_order_count = (2 if has_dual_entry else 1) * self.native_leg_count(signal.new_order.take_profit, signal.new_order.take_profit_2)
             override_data = {"signal": signal, "signal_time": signal_time, "db_id": signal_db_id,
                              "message_id": message_id, "allowed_rule": None,
@@ -1726,6 +1732,7 @@ class TradingService(SlippageLimitMixin, ManagementScopeMixin, NativeTPMixin, Cl
                     "auto_cancel_pending_on_full_close": config.auto_cancel_pending_on_full_close,
                     "breakeven_offset_price": str(config.breakeven_offset_price),
                     "allow_multiple_partial_closes": bool(config.allow_multiple_partial_closes),
+                    "repeat_partial_close_keywords": list(config.repeat_partial_close_keywords),
                 },
                 ("signal", "timing"): {
                     "duplicate_timeout_seconds": int(config.duplicate_timeout_seconds),

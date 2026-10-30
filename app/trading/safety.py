@@ -116,6 +116,14 @@ class TradingSafetyMixin:
                     field("Tổng khối lượng", f"{number(sum(volumes))} lot")), ""]
             if not problem:
                 context = await self.build_risk_context()
+                from app.trading.position_policy import PartialVolumeTooSmall
+                for pos in await self.opposite_signal_positions(order):
+                    try:
+                        amount = await self.partial_volume(pos, Decimal('50'))
+                        lines.append(f'Signal ngược chiều: chốt 50% {pos.symbol} {pos.position_type} '
+                                     f'còn lại ({number(pos.volume)} → đóng {number(amount)} lot).')
+                    except PartialVolumeTooSmall:
+                        lines.append(f'{pos.symbol} {pos.position_type}: lot còn lại quá nhỏ để chốt 50%; giữ nguyên.')
                 context.planned_order_count = len(volumes) * self.native_leg_count(order.take_profit, order.take_profit_2)
                 decision = self.risk_engine.evaluate(signal, context)
                 if not decision.approved:
@@ -212,6 +220,9 @@ class TradingSafetyMixin:
             for action in signal.management_actions:
                 if action.action_type.value == "PARTIAL_CLOSE":
                     lines.append(f"Tỷ lệ chốt thực thi: {self.partial_percentage(action)}%")
+                    if self.partial_percentage(action) not in {0, 100}:
+                        lines.append('Nếu vị thế đã chốt một phần: ' + ('được phép chốt tiếp theo cấu hình/từ khóa.'
+                                     if self.repeat_partial_allowed(signal.raw_message) else 'bỏ qua vì tin này chưa được phép chốt tiếp.'))
                 if action.price is not None:
                     lines.append(f"SL đích được yêu cầu: {action.price}")
             can_execute = not problem

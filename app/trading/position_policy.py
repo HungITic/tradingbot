@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 from html import escape
 
@@ -33,6 +34,9 @@ class PositionPolicyMixin:
                 "Không đủ lot để tách: từ chối mở nhánh. Chính sách thiếu lot TP1 chỉ dùng cho lệnh cũ.\n"
                 "Chỉ có một TP: đóng toàn bộ tại TP đó.\n"
                 "Trượt giá bất lợi quá ngưỡng: tự đặt limit tại entry. Có action liên quan thì hủy phần limit đó còn chờ.\n"
+                "Signal ngược chiều cùng symbol: chốt tiếp 50% lot còn lại của vị thế bot, không phụ thuộc cấu hình chốt lặp.\n"
+                f"Chốt lặp chung: {'bật' if cfg.allow_multiple_partial_closes else 'tắt'}. "
+                f"Từ khóa được chốt tiếp: {escape(', '.join(cfg.repeat_partial_close_keywords) or 'chưa có')}.\n"
                 f"\n<b>QUẢN LÝ NHÁNH</b>\nChốt bớt + xấu: chốt {cfg.bad_entry_partial_close_percent}% Min Entry, giữ Max Entry.\n"
                 f"Chốt bớt chung dùng tỷ lệ cấu hình: {'bật' if cfg.generic_partial_uses_default else 'tắt'}.\n"
                 f"Hủy Max Entry còn chờ khi Min Entry có lần chốt: {'bật' if cfg.auto_cancel_pending_on_full_close else 'tắt'}.\n"
@@ -47,6 +51,18 @@ class PositionPolicyMixin:
                 and action.percentage_source != "message"):
             return self.risk_config.default_partial_close_percent
         return action.percentage if action.percentage is not None else self.risk_config.default_partial_close_percent
+
+    def repeat_partial_allowed(self, raw_message):
+        if self.risk_config.allow_multiple_partial_closes:
+            return True
+        text = ' '.join(unicodedata.normalize('NFC', raw_message).casefold().split())
+        return any(re.search(r'(?<!\w)' + re.escape(phrase) + r'(?!\w)', text)
+                   for phrase in self.risk_config.repeat_partial_close_keywords)
+
+    def position_was_reduced(self, pos, order, history):
+        return (pos.ticket in history or pos.ticket in self._tp1_processed_tickets
+                or bool(order and order.volume is not None and pos.volume < order.volume)
+                or (pos.initial_volume is not None and pos.volume < pos.initial_volume))
 
     async def position_orders(self, positions: list[PositionInfo]) -> dict:
         if not positions:
@@ -186,6 +202,59 @@ class PositionPolicyMixin:
             await self.cancel_dual_entry_pending_orders_on_close(pos.ticket, reason="Min Entry đã chốt một phần")
         return result, volume
 
+    async def opposite_signal_positions(self, order):
+        """Only recorded bot positions of the exact symbol and opposite side qualify."""
+        opposite = 'SELL' if order.action.value == 'BUY' else 'BUY'
+        candidates = [p for p in await self.broker.get_positions()
+                      if p.symbol == order.symbol and p.position_type == opposite]
+        orders = await self.position_orders(candidates)
+        managed = [p for p in candidates if p.ticket in orders
+                   and isinstance(orders[p.ticket].signal_id, int) and orders[p.ticket].signal_id > 0]
+        return await self.group_native_positions(managed)
+
+    async def close_opposite_signal_half(self, order, signal_id, message_link=None):
+        """None means no targets; False stops entry after a failed/ambiguous reduction."""
+        positions = await self.opposite_signal_positions(order)
+        if not positions:
+            return None
+        if signal_id is None:
+            raise ValueError('Thiếu nhật ký signal ngược chiều; chưa chốt vị thế')
+        from app.models.risk import RiskEvent
+        # Commit the trigger before MT5; replay must never halve the same signal twice.
+        async with database.get_session() as session:
+            session.add(RiskEvent(signal_id=signal_id, event_type='OPPOSITE_SIGNAL_HALF',
+                rule_name='opposite_signal_half', details={'symbol': order.symbol,
+                    'new_side': order.action.value, 'percentage': '50',
+                    'positions': [{'ticket': p.ticket, 'volume': str(p.volume)} for p in positions]}))
+        changed = False
+        for pos in positions:
+            try:
+                await self.partial_volume(pos, Decimal('50'))
+            except PartialVolumeTooSmall as exc:
+                await self._insert_management_action(signal_id, pos.ticket, 'PARTIAL_CLOSE',
+                    {'reason': 'OPPOSITE_SIGNAL_HALF', 'percentage': '50', 'volume': '0'},
+                    'SKIPPED', {'comment': str(exc)})
+                await self.notify(self.format_notification(
+                    f'ℹ️ Signal ngược chiều · {escape(pos.symbol)}: lot còn lại quá nhỏ để chốt 50%; giữ nguyên vị thế.', message_link))
+                continue
+            result, volume = await self.partial_one(pos, Decimal('50'))
+            if result.raw.get('uncertain'):
+                self.risk_config.enabled = False
+            await self.record_management(signal_id, pos, 'PARTIAL_CLOSE', result,
+                reason='OPPOSITE_SIGNAL_HALF', percentage='50', volume=str(volume))
+            await self.notify(self.format_notification(
+                f"{'✅' if result.success else '❌'} Signal {order.action.value} ngược chiều · "
+                f'{escape(pos.symbol)} {pos.position_type}: chốt 50% lot còn lại ({volume} lot). '
+                f'{escape(result.comment)}', message_link))
+            changed |= result.success or bool(result.volume)
+            if (not result.success or result.retcode == 10010 or result.raw.get('uncertain')
+                    or (result.volume is not None and result.volume != volume)):
+                await self.set_signal_status(signal_id, 'PARTIAL' if changed else 'ERROR',
+                    'Chốt theo signal ngược chiều chưa hoàn tất; chưa mở lệnh mới')
+                await self.notify('⛔ Chốt theo signal ngược chiều chưa hoàn tất; chưa mở lệnh mới và không tự chốt lại.')
+                return False
+        return True
+
     async def management_history(self, positions: list[PositionInfo]) -> tuple[set, set]:
         """Read audit by ticket in JSON, with a fallback for older Position-linked records."""
         tickets = [p.ticket for p in positions]
@@ -219,7 +288,7 @@ class PositionPolicyMixin:
             cause = parameters.get("reason")
             if parameters.get("target") == "MIN_ENTRY" and action == "PARTIAL_CLOSE":
                 cause = "MIN_ENTRY_PARTIAL"
-            if cause not in {"TP1_PARTIAL", "FINAL_TP", "MANUAL_PARTIAL", "MANUAL_CLOSE", "CLOSE_ALL", "KILL_SWITCH", "MIN_ENTRY_PARTIAL"}:
+            if cause not in {"TP1_PARTIAL", "FINAL_TP", "MANUAL_PARTIAL", "MANUAL_CLOSE", "CLOSE_ALL", "KILL_SWITCH", "MIN_ENTRY_PARTIAL", "OPPOSITE_SIGNAL_HALF"}:
                 cause = "SIGNAL_PARTIAL" if action == "PARTIAL_CLOSE" else "SIGNAL_CLOSE"
             partial = ((action == "PARTIAL_CLOSE" and Decimal(parameters.get("volume", "0")) < pos.volume) or result.retcode == 10010
                        or (result.volume is not None and 0 < result.volume < pos.volume))
@@ -248,9 +317,7 @@ class PositionPolicyMixin:
         results = []
         for pos in positions:
             order = orders.get(pos.ticket)
-            already = pos.ticket in history or pos.ticket in self._tp1_processed_tickets
-            already |= bool(order and order.volume is not None and pos.volume < order.volume)
-            already |= pos.initial_volume is not None and pos.volume < pos.initial_volume
+            already = self.position_was_reduced(pos, order, history)
             if already and Decimal(str(percentage)) not in {0, 100} and not self.risk_config.allow_multiple_partial_closes:
                 result, volume = OrderResult(False, ticket=pos.ticket, comment="Vị thế đã chốt một phần; đã chặn chốt lặp"), Decimal("0")
             else:
@@ -455,11 +522,9 @@ class PositionPolicyMixin:
                         await self.notify(f"ℹ️ {reply_tag} · Bỏ qua chốt vì tỷ lệ là 0%.")
                         continue
                     db_order = orders.get(pos.ticket)
-                    already = pos.ticket in partial_history or pos.ticket in self._tp1_processed_tickets
-                    already |= bool(db_order and db_order.volume is not None and pos.volume < db_order.volume)
-                    already |= pos.initial_volume is not None and pos.volume < pos.initial_volume
-                    if partial and percentage < 100 and already and not self.risk_config.allow_multiple_partial_closes:
-                        await self.notify(f"ℹ️ {reply_tag} · Bỏ qua chốt bớt #{pos.ticket}: Vị thế đã chốt 1 phần trước đó.")
+                    already = self.position_was_reduced(pos, db_order, partial_history)
+                    if partial and percentage < 100 and already and not self.repeat_partial_allowed(signal.raw_message):
+                        await self.notify(f"ℹ️ {reply_tag} · Bỏ qua chốt bớt #{pos.ticket}: Vị thế đã chốt 1 phần trước đó; loại signal này chưa được phép chốt tiếp.")
                         continue
                     if partial:
                         result, volume = await self.partial_one(pos, percentage)

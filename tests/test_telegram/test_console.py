@@ -204,6 +204,8 @@ def test_settings_menu_exposes_every_editable_runtime_field_once():
     ('bad_entry_partial_close_percent', '35', D('35')),
     ('bad_entry_partial_close_percent', '100', D('100')),
     ('default_partial_close_percent', '0', D('0')),
+    ('repeat_partial_close_keywords', 'chốt bớt entry xấu, chốt bớt 1 phần', ['chốt bớt entry xấu', 'chốt bớt 1 phần']),
+    ('repeat_partial_close_keywords', '[]', []),
 ])
 async def test_added_settings_input_preview_and_confirm(bot, key, value, expected):
     from unittest.mock import patch

@@ -34,6 +34,7 @@ CLOSE_CAUSES = {
     "FINAL_TP": "Bot đóng tại TP cuối",
     "MIN_ENTRY_PARTIAL": "Tín hiệu chốt bớt entry xấu · Min Entry",
     "SIGNAL_PARTIAL": "Chốt một phần theo tín hiệu Telegram",
+    "OPPOSITE_SIGNAL_HALF": "Chốt 50% còn lại do signal ngược chiều",
     "SIGNAL_CLOSE": "Đóng lệnh theo tín hiệu Telegram",
     "MANUAL_PARTIAL": "Chốt một phần từ menu / command Telegram",
     "MANUAL_CLOSE": "Đóng lệnh từ menu / command Telegram",

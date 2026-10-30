@@ -423,6 +423,48 @@ async def test_bad_entry_preview_shows_exact_target_before_execution(svc):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('text,keywords,global_allow,expected', [
+    ('XAUUSD chốt bớt entry xấu', ['chốt bớt entry xấu'], False, True),
+    ('XAUUSD chốt bớt', ['chốt bớt entry xấu'], False, False),
+    ('XAUUSD chốt 1 phần', ['chốt 1 phần'], False, True),
+    ('XAUUSD chốt 1 phần', [], False, False),
+    ('XAUUSD chốt 1 phần', [], True, True),
+    ('XAUUSD chốt bớt 100%', [], False, True),
+])
+async def test_signal_keyword_exceptions_allow_only_selected_repeat_closes(svc, text, keywords, global_allow, expected):
+    pos = position(volume='.10')
+    pos.comment = 'bot-min-entry'
+    svc.broker.get_positions.return_value = [pos]
+    svc.position_orders.return_value = {1: SimpleNamespace(signal_id=10, volume=D('.20'), comment='bot-min-entry')}
+    svc.management_history.return_value = ({1}, set())
+    svc.risk_config = svc.risk_config.with_updates({'repeat_partial_close_keywords': keywords,
+        'allow_multiple_partial_closes': global_allow, 'auto_breakeven_on_partial': False})
+    await svc.process_management_signal(SignalParser().parse(text), 20, None, None)
+    assert bool(svc.broker.close_position.await_count) == expected
+    if expected:
+        amount = D('.10') if '100%' in text else D('.05')
+        svc.broker.close_position.assert_awaited_once_with(1, amount)
+
+
+@pytest.mark.asyncio
+async def test_keyword_exception_does_not_enable_manual_repeat_closes(svc):
+    pos = position(volume='.10')
+    svc.broker.get_positions.return_value = [pos]
+    svc.management_history.return_value = ({1}, set())
+    svc.risk_config.repeat_partial_close_keywords = ['chốt bớt']
+    await svc.partial_close_positions(percentage=D('50'))
+    svc.broker.close_position.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unknown_allowlisted_phrase_cannot_create_a_trading_action(svc):
+    svc.risk_config.repeat_partial_close_keywords = ['kèo chạy rồi ae']
+    preview = await svc.preview_signal('kèo chạy rồi AE')
+    assert not preview['can_execute']
+    svc.broker.close_position.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_tp1_moves_each_position_to_its_own_entry(svc):
     first, second = position(1, '2650', sl='2630'), position(2, '2640', sl='2630')
     svc.broker.get_positions.return_value = [first, second]

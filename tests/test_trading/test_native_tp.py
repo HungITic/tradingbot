@@ -319,6 +319,21 @@ async def test_reply_after_tp1_exit_targets_remaining_member(native):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('keywords,expected', [([], False), (['chốt bớt entry xấu'], True)])
+async def test_keyword_exception_after_native_tp1_survives_empty_memory(native, keywords, expected):
+    svc, rows, live = native
+    rows += [order(1, '.03'), order(2, '.07', 'tp2')]
+    live += [position(2, '.07', 'tp2')]
+    svc.risk_config.repeat_partial_close_keywords = keywords
+    svc.risk_config.auto_breakeven_on_partial = False
+    svc.get_tickets_for_reply_message = AsyncMock(return_value=[1, 2])
+    await svc.process_management_signal(SignalParser().parse('chốt bớt entry xấu'), 30, 123, None)
+    assert bool(svc.broker.close_position.await_count) == expected
+    if expected:
+        svc.broker.close_position.assert_awaited_once_with(2, D('.03'))
+
+
+@pytest.mark.asyncio
 async def test_native_two_branches_count_four_positions_before_send(native):
     svc, _, _ = native
     svc.risk_config.max_open_positions = 3

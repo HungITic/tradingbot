@@ -88,7 +88,7 @@ def config_value(value):
     if isinstance(value, bool):
         return "Bật" if value else "Tắt"
     if isinstance(value, list):
-        return ", ".join(str(item) for item in value)
+        return ", ".join(str(item) for item in value) or "Không có"
     labels = {"ticket": "Entry riêng từng lệnh", "breakeven": "Chỉ dời SL nếu đã bật tự dời", "skip": "Bỏ qua"}
     if isinstance(value, str) and value in labels:
         return labels[value]

@@ -29,6 +29,7 @@ async def reclaim_unexecuted_message(session, chat_id, message_id, raw_text, con
         exists().where(Order.signal_id.in_(ids)),
         exists().where(BrokerCommand.signal_id.in_(ids)),
         exists().where(ManagementAction.signal_id.in_(ids)),
+        exists().where(RiskEvent.signal_id.in_(ids), RiskEvent.event_type == 'OPPOSITE_SIGNAL_HALF'),
         exists().where(BrokerCommand.status.in_(['SUBMITTED', 'UNKNOWN'])),
         exists().where(RiskEvent.event_type == 'LIMIT_INVALIDATED',
             RiskEvent.details['trigger_chat_id'].astext == str(chat_id),

@@ -66,7 +66,8 @@ async def test_sl_tp_and_stopout_take_precedence_over_old_bot_context(service):
 @pytest.mark.asyncio
 @pytest.mark.parametrize('cause,label', [('TP1_PARTIAL', 'TP1'), ('MIN_ENTRY_PARTIAL', 'entry xấu'),
     ('MANUAL_PARTIAL', 'menu / command'), ('SIGNAL_PARTIAL', 'tín hiệu'), ('SIGNAL_CLOSE', 'tín hiệu'),
-    ('KILL_SWITCH', 'khẩn cấp'), ('CLOSE_ALL', 'toàn bộ'), ('FINAL_TP', 'TP cuối')])
+    ('KILL_SWITCH', 'khẩn cấp'), ('CLOSE_ALL', 'toàn bộ'), ('FINAL_TP', 'TP cuối'),
+    ('OPPOSITE_SIGNAL_HALF', 'ngược chiều')])
 async def test_exact_deal_execution_identifies_bot_action(service, cause, label):
     service.close_execution_metadata(1, execution(), cause, partial=True)
     reason, context = await service.exit_reason(deal())

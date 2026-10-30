@@ -6,9 +6,11 @@ from __future__ import annotations
 
 from decimal import Decimal
 from enum import Enum
+import re
+import unicodedata
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class RiskStatus(str, Enum):
@@ -56,6 +58,7 @@ class RiskConfig(BaseModel):
     auto_breakeven_on_partial: bool = True
     breakeven_offset_price: Decimal = Decimal("0.0")
     allow_multiple_partial_closes: bool = False  # False = Chặn chốt từng phần lặp lại cho cùng 1 vị thế
+    repeat_partial_close_keywords: list[str] = Field(default_factory=list)
 
     # Explicit position policy, shared by TP1, commands and Telegram buttons.
     breakeven_mode: Literal["ticket"] = "ticket"
@@ -74,6 +77,22 @@ class RiskConfig(BaseModel):
 
     # Broker Server Timezone Offset
     broker_utc_offset_hours: int = 3  # Chênh lệch UTC của sàn (PUPrime EET/EEST: +3 hè, +2 đông)
+
+    @field_validator('repeat_partial_close_keywords', mode='before')
+    @classmethod
+    def parse_repeat_keywords(cls, value):
+        if isinstance(value, str):
+            value = [] if value.strip() == '[]' else re.split(r'[,\n]+', value)
+        if isinstance(value, list):
+            keywords = []
+            for phrase in value:
+                if not isinstance(phrase, str):
+                    raise ValueError('Từ khóa chốt tiếp phải là chuỗi văn bản')
+                phrase = ' '.join(unicodedata.normalize('NFC', phrase).casefold().split())
+                if phrase and phrase not in keywords:
+                    keywords.append(phrase)
+            return keywords
+        return value
 
     @model_validator(mode="after")
     def check_limits(self):
