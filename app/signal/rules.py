@@ -154,7 +154,7 @@ class ManagementRuleEngine:
                 target = rule.default_params.get("target")
                 if (rule.action_type == ManagementType.PARTIAL_CLOSE
                         and re.search(r"\bchốt\s+bớt\b", lower_text)
-                        and re.search(r"\bxấu\b", lower_text)):
+                        and re.search(r"\bxấu\b", lower_text) and target not in {'TP1', 'TP2'}):
                     target = "MIN_ENTRY"
 
                 price = None

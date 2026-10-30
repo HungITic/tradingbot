@@ -1813,6 +1813,10 @@ class TradingService(SlippageLimitMixin, ManagementScopeMixin, NativeTPMixin, Cl
             return False
         if not clean_kw or len(clean_kw) > 100:
             return False
+        if target is not None:
+            target = target.upper().strip()
+            if target.startswith('TP') and (target not in {'TP1', 'TP2'} or action_type == ManagementType.REENTRY):
+                return False
         if allow_repeat is not None and (type(allow_repeat) is not bool or action_type != ManagementType.PARTIAL_CLOSE):
             return False
         if percentage is not None and (not percentage.is_finite() or not 0 <= percentage <= 100):

@@ -9,7 +9,7 @@ from typing import Any
 from app.telegram.presentation import heading, section, field, price as display_price, number, DIVIDER
 from app.broker.base import OrderRequest, OrderResult
 from app.core.timezone import now_vietnam, to_vietnam_datetime
-from app.signal.models import MessageType, OrderAction
+from app.signal.models import MessageType, OrderAction, ManagementType
 from app.signal.validator import SignalValidator
 
 
@@ -177,7 +177,7 @@ class TradingSafetyMixin:
                 else:
                     tickets = await self.get_tickets_for_reply_message(reply_id)
                 positions = [p for p in positions if self.branch_has_ticket(p, tickets)]
-                if any(a.action_type.value == 'CLOSE' for a in signal.management_actions):
+                if any(a.action_type.value == 'CLOSE' and a.target not in {'TP1', 'TP2'} for a in signal.management_actions):
                     pending_scope = [o for o in await self.broker.get_pending_orders() if o.ticket in tickets]
                 lines.append("Phạm vi reply: " + (", ".join(map(str, tickets)) or "không tìm thấy vị thế"))
                 problem = problem or (None if tickets else "Không xác định được kèo đích")
@@ -206,14 +206,27 @@ class TradingSafetyMixin:
                 except Exception as exc:
                     problem = str(exc)
             problem = problem or (None if positions or pending_scope or limit_cancellations else "Không có vị thế phù hợp")
-            if any(a.target == "MIN_ENTRY" for a in signal.management_actions) and positions:
+            if any(a.target in {'MIN_ENTRY', 'TP1', 'TP2'} for a in signal.management_actions) and positions:
                 try:
-                    orders = await self.position_orders(positions)
+                    children = [child for p in positions for child in (p.members or (p,))]
+                    orders = await self.position_orders(children)
                     groups = await self.position_groups(positions, orders)
                     for action in signal.management_actions:
-                        if action.target == "MIN_ENTRY":
+                        if action.target in {'MIN_ENTRY', 'TP1', 'TP2'}:
                             selected = self.management_selection(action, positions, orders, groups, reply_id, signal.raw_message)
-                            lines.append("Chỉ chốt Min Entry: " + ", ".join(f"#{p.ticket}" for p in selected) + "; giữ nguyên Max Entry.")
+                            if action.target == 'MIN_ENTRY':
+                                lines.append("Chỉ chốt Min Entry: " + ", ".join(f"#{p.ticket}" for p in selected) + "; giữ nguyên Max Entry.")
+                            else:
+                                lines.append(f'Chỉ tác động phần {action.target}: ' +
+                                             ', '.join(f'#{p.ticket} ({number(p.volume)} lot còn lại)' for p in selected) +
+                                             '; giữ nguyên phần TP khác.')
+                                if action.action_type == ManagementType.PARTIAL_CLOSE:
+                                    for pos in selected:
+                                        try:
+                                            volume = await self.partial_volume(pos, self.partial_percentage(action))
+                                            lines.append(f'#{pos.ticket}: dự kiến chốt {number(volume)} lot của phần {action.target}.')
+                                        except ValueError as exc:
+                                            lines.append(f'#{pos.ticket}: {escape(str(exc))}')
                 except Exception as exc:
                     problem = problem or str(exc)
             lines.extend(["", DIVIDER, "", self.management_policy_description(), ""])

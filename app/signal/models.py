@@ -50,7 +50,7 @@ class ParsedManagementAction(BaseModel):
 
     action_type: ManagementType
     percentage: Decimal | None = None  # e.g., 50 for 50% partial close
-    target: str | None = None  # e.g., "ENTRY", "BREAKEVEN"
+    target: str | None = None  # ENTRY, BREAKEVEN, MIN_ENTRY, TP1, TP2
     price: Decimal | None = None
     percentage_source: str = "default"
     side: OrderAction | None = None

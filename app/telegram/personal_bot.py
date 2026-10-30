@@ -830,8 +830,8 @@ class PersonalTelegramBot(TelegramConsoleMixin):
                 param_str = ""
                 if "percentage" in r.default_params:
                     param_str = f"({r.default_params['percentage']}%)"
-                elif "target" in r.default_params:
-                    param_str = f"({r.default_params['target']})"
+                if "target" in r.default_params:
+                    param_str += f" · Phạm vi: {r.default_params['target']}"
 
                 action_name = r.action_type.value if hasattr(r.action_type, "value") else str(r.action_type)
                 if action_name == 'PARTIAL_CLOSE':
@@ -845,6 +845,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
                 "• Thêm/sửa: <code>/rule add &lt;từ khóa&gt; &lt;ACTION&gt; [params]</code>\n"
                 "  <i>VD:</i> <code>/rule add \"cắt bớt\" PARTIAL_CLOSE 50</code>\n"
                 "  <i>Cho phép chốt tiếp:</i> <code>/rule add \"chốt bớt entry xấu\" PARTIAL_CLOSE 30 repeat=true</code>\n"
+                "  <i>Chỉ phần TP1:</i> <code>/rule add \"gần tp1\" PARTIAL_CLOSE 70 target=TP1 repeat=true</code>\n"
                 "  <i>Chặn chốt tiếp:</i> dùng <code>repeat=false</code>; bỏ tham số sẽ giữ quyền đã lưu hoặc theo cấu hình chung.\n"
                 "  <i>VD:</i> <code>/rule add \"về hòa\" BREAKEVEN</code>\n"
                 "  <i>VD:</i> <code>/rule add \"chốt sạch\" CLOSE</code>\n"
@@ -873,7 +874,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
             await update.message.reply_text(
                 "⚠️ <b>Cú pháp quản lý từ khóa:</b>\n"
                 ""
-                "• Thêm: <code>/rule add &lt;từ khóa&gt; &lt;ACTION&gt; [params] [repeat=true|false]</code>\n"
+                "• Thêm: <code>/rule add &lt;từ khóa&gt; &lt;ACTION&gt; [params] [target=TP1|TP2] [repeat=true|false]</code>\n"
                 "• Ví dụ: <code>/rule add \"chốt bớt entry xấu\" PARTIAL_CLOSE 30 repeat=true</code>\n"
                 "• Xóa: <code>/rule del &lt;từ khóa&gt;</code>\n\n"
                 "<i>Xem danh sách: /rules</i>",
@@ -902,9 +903,12 @@ class PersonalTelegramBot(TelegramConsoleMixin):
                 for val in tokens[4:]:
                     if '=' in val:
                         name, value = val.lower().split('=', 1)
-                        if name != 'repeat' or value not in {'true', 'false'} or allow_repeat is not None:
-                            raise ValueError('Tham số repeat phải là true hoặc false, chỉ nhập một lần')
-                        allow_repeat = value == 'true'
+                        if name == 'target' and target is None and value.upper() in {'TP1', 'TP2', 'MIN_ENTRY', 'ENTRY', 'BREAKEVEN'}:
+                            target = value.upper()
+                        elif name == 'repeat' and value in {'true', 'false'} and allow_repeat is None:
+                            allow_repeat = value == 'true'
+                        else:
+                            raise ValueError('Tham số chưa hợp lệ hoặc bị lặp; dùng target=TP1/TP2 và repeat=true/false')
                     else:
                         try:
                             amount = Decimal(val.replace('%', ''))
@@ -937,6 +941,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
                     f"• Từ khóa: <code>{escape(keyword)}</code>\n"
                     f"• Hành động: <b>{escape(action_type_str)}</b>\n"
                     f"• Tham số: {escape(str(percentage if percentage is not None else target or 'Mặc định'))}\n"
+                    f"• Phạm vi: {escape(target or 'Theo kèo / nội dung signal')}\n"
                     f"• Chốt tiếp: {'bật' if allow_repeat is True else 'tắt' if allow_repeat is False else 'giữ quyền cũ / theo cấu hình chung'}\n\n"
                     f"<i>Đã cập nhật hệ thống và lưu trữ vào database.</i>",
                     parse_mode=ParseMode.HTML,

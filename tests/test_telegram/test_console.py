@@ -72,6 +72,26 @@ async def test_rules_list_displays_explicit_repeat_permission(bot):
     assert 'chốt bớt entry xấu' in text and 'Chốt tiếp: bật' in text and 'repeat=true' in text
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('scope', ['target=TP1', 'TP1'])
+async def test_rule_command_accepts_tp_scope_with_percentage_and_repeat(bot, scope):
+    message = SimpleNamespace(text=f'/rule add "gần tp1" PARTIAL_CLOSE 70 {scope} repeat=true', reply_text=AsyncMock())
+    bot.service.add_or_update_management_rule = AsyncMock(return_value=True)
+    await bot.cmd_rule.__wrapped__(bot, SimpleNamespace(message=message), SimpleNamespace())
+    bot.service.add_or_update_management_rule.assert_awaited_once_with(keyword='gần tp1', action_type_str='PARTIAL_CLOSE',
+        percentage=D('70'), target='TP1', allow_repeat=True)
+    assert 'Phạm vi: TP1' in message.reply_text.call_args.args[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('scope', ['target=TP3', 'target=TP1 target=TP2', 'target=TP1 TP2'])
+async def test_rule_command_rejects_invalid_or_duplicate_tp_scope(bot, scope):
+    message = SimpleNamespace(text=f'/rule add "gần tp1" PARTIAL_CLOSE 70 {scope}', reply_text=AsyncMock())
+    bot.service.add_or_update_management_rule = AsyncMock()
+    await bot.cmd_rule.__wrapped__(bot, SimpleNamespace(message=message), SimpleNamespace())
+    bot.service.add_or_update_management_rule.assert_not_awaited()
+
+
 def position(ticket, volume='.02'):
     return PositionInfo(ticket, 'XAUUSD', D(volume), D('2650'), D('2655'), D('2640'), D('2670'), D('5'), D('0'), D('0'), 'BUY', datetime.now(timezone.utc))
 

@@ -57,6 +57,34 @@ async def test_edit_percentage_without_repeat_preserves_previous_permission(rule
 
 
 @pytest.mark.asyncio
+async def test_tp_target_and_repeat_reload_together(rule_store):
+    svc = TradingService(broker=AsyncMock())
+    assert await svc.add_or_update_management_rule('gần tp1', 'PARTIAL_CLOSE', D('70'),
+                                                  target='tp1', allow_repeat=True)
+    restarted = TradingService(broker=AsyncMock())
+    await restarted.load_management_rules_from_db()
+    action = restarted.parser.parse('XAUUSD gần tp1').management_actions[0]
+    assert action.target == 'TP1' and action.allow_repeat is True
+    assert restarted.partial_percentage(action) == D('70')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('target,kind', [('TP3', 'PARTIAL_CLOSE'), ('TP1', 'REENTRY')])
+async def test_invalid_tp_target_is_not_saved(rule_store, target, kind):
+    rows, _ = rule_store
+    svc = TradingService(broker=AsyncMock())
+    assert not await svc.add_or_update_management_rule('custom', kind, target=target)
+    assert not rows
+
+
+def test_explicit_tp_scope_is_not_overridden_by_bad_entry_words():
+    svc = TradingService(broker=AsyncMock())
+    svc.parser.rule_engine.add_or_update_rule('chốt bớt entry xấu', ManagementType.PARTIAL_CLOSE,
+                                             {'target': 'TP1', 'percentage': D('70')})
+    assert svc.parser.parse('chốt bớt entry xấu').management_actions[0].target == 'TP1'
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('action,percentage,allow', [
     ('CLOSE', None, True), ('PARTIAL_CLOSE', D('101'), True),
     ('PARTIAL_CLOSE', D('NaN'), True), ('PARTIAL_CLOSE', D('30'), 'false'),

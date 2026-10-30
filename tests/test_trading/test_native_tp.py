@@ -10,6 +10,7 @@ import pytest
 
 from app.broker.base import AccountInfo, OrderRequest, OrderResult, PositionInfo, SymbolInfo, DealInfo, ClosedPositionInfo, PartialCloseDealInfo, TickInfo, PendingOrderInfo
 from app.signal.parser import SignalParser
+from app.signal.models import ManagementType
 from app.trading.risk import RiskConfig
 from app.trading.service import TradingService
 
@@ -351,3 +352,124 @@ async def test_explicit_sl_equal_to_average_is_not_changed_to_individual_entries
     rows += [order(1, '.05'), order(2, '.05', 'tp2')]
     await svc.process_management_signal(SignalParser().parse('XAUUSD dời SL về 2651'), 30, None, None)
     assert [call.kwargs['sl'] for call in svc.broker.modify_position.call_args_list] == [D('2651.00'), D('2651.00')]
+
+
+def configure_tp_action(native, target='TP1', percentage='70', repeat=True):
+    svc, rows, live = native
+    rows += [order(1, '.45'), order(2, '1.05', 'tp2')]
+    live += [position(1, '.45'), position(2, '1.05', 'tp2')]
+    svc.broker.get_positions.side_effect = lambda: [replace(p) for p in live]
+    svc.parser.rule_engine.add_or_update_rule('gần tp', ManagementType.PARTIAL_CLOSE,
+        {'percentage': D(percentage), 'percentage_explicit': True, 'target': target, 'allow_repeat': repeat})
+    return svc, rows, live
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('target,ticket,amount,remaining', [('TP1', 1, '.31', '.14'), ('TP2', 2, '.73', '.32')])
+async def test_tp_target_reduces_only_selected_child_including_auto_be(native, target, ticket, amount, remaining):
+    svc, _, live = configure_tp_action(native, target)
+    before = {p.ticket: replace(p) for p in live}
+    await svc.process_management_signal(svc.parser.parse('XAUUSD gần tp'), 30, None, None)
+    svc.broker.close_position.assert_awaited_once_with(ticket, D(amount))
+    assert next(p for p in live if p.ticket == ticket).volume == D(remaining)
+    other = 3-ticket
+    assert next(p for p in live if p.ticket == other) == before[other]
+    svc.broker.modify_position.assert_awaited_once_with(ticket, sl=D('2650.00'))
+    assert svc._insert_management_action.await_args_list[0].args[1] == ticket
+    assert svc._insert_management_action.await_args_list[0].args[3]['target'] == target
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('repeat,remaining', [(True, '.05'), (False, '.14')])
+async def test_tp_repeat_uses_remaining_child_volume(native, repeat, remaining):
+    svc, _, live = configure_tp_action(native, repeat=repeat)
+    svc.risk_config.auto_breakeven_on_partial = False
+    for signal_id in (30, 31):
+        await svc.process_management_signal(svc.parser.parse('XAUUSD gần tp'), signal_id, None, None)
+    assert next(p for p in live if p.ticket == 1).volume == D(remaining)
+    assert next(p for p in live if p.ticket == 2).volume == D('1.05')
+
+
+@pytest.mark.asyncio
+async def test_tp1_closed_in_full_never_falls_back_to_tp2(native):
+    svc, _, live = configure_tp_action(native, percentage='100')
+    for signal_id in (30, 31):
+        await svc.process_management_signal(svc.parser.parse('XAUUSD gần tp'), signal_id, None, None)
+    svc.broker.close_position.assert_awaited_once_with(1, D('.45'))
+    assert len(live) == 1 and live[0].ticket == 2 and live[0].volume == D('1.05')
+
+
+@pytest.mark.asyncio
+async def test_reducing_tp1_does_not_mark_untouched_tp2_as_already_partial(native):
+    svc, _, live = configure_tp_action(native, repeat=False)
+    svc.risk_config.auto_breakeven_on_partial = False
+    await svc.process_management_signal(svc.parser.parse('XAUUSD gần tp'), 30, None, None)
+    svc.parser.rule_engine.add_or_update_rule('gần tp', ManagementType.PARTIAL_CLOSE,
+        {'percentage': D('70'), 'percentage_explicit': True, 'target': 'TP2', 'allow_repeat': False})
+    await svc.process_management_signal(svc.parser.parse('XAUUSD gần tp'), 31, None, None)
+    assert [c.args for c in svc.broker.close_position.await_args_list] == [(1, D('.31')), (2, D('.73'))]
+
+
+@pytest.mark.asyncio
+async def test_tp_target_reply_stays_with_exact_setup_and_covers_both_entry_branches(native):
+    svc, rows, live = configure_tp_action(native)
+    rows += [order(3, '.45', branch='bot-max-entry'), order(4, '1.05', 'tp2', branch='bot-max-entry'),
+             order(5, '.45', signal_id=11)]
+    live += [replace(position(3, '.45'), comment='bot-max-entry:tp1'),
+             replace(position(4, '1.05', 'tp2'), comment='bot-max-entry:tp2'), position(5, '.45')]
+    svc.get_tickets_for_reply_message = AsyncMock(return_value=[1, 2, 3, 4])
+    await svc.process_management_signal(svc.parser.parse('gần tp'), 30, 123, None)
+    assert [c.args for c in svc.broker.close_position.await_args_list] == [(1, D('.31')), (3, D('.31'))]
+    assert next(p for p in live if p.ticket == 5).volume == D('.45')
+    assert not any(c.args[0] in {2, 4, 5} for c in svc.broker.modify_position.await_args_list)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('problem', ['missing', 'conflict', 'legacy', 'minimum'])
+async def test_ambiguous_or_missing_tp_target_never_closes_another_leg(native, problem):
+    svc, rows, live = configure_tp_action(native)
+    if problem == 'missing':
+        live.pop(0)
+    elif problem == 'conflict':
+        live[0].comment = 'bot-min-entry:tp2'
+    elif problem == 'legacy':
+        live[0].comment = rows[0].comment = 'bot-min-entry'
+    else:
+        live[0].volume = D('.01')
+    svc.risk_config.auto_breakeven_on_partial = False
+    await svc.process_management_signal(svc.parser.parse('XAUUSD gần tp'), 30, None, None)
+    svc.broker.close_position.assert_not_awaited()
+    svc.broker.modify_position.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_tp_preview_displays_child_volume_and_closing_amount_without_side_effects(native):
+    svc, _, _ = configure_tp_action(native)
+    result = await svc.preview_signal('XAUUSD gần tp')
+    assert result['can_execute']
+    assert 'Chỉ tác động phần TP1: #1' in result['text'] and '0.31 lot' in result['text']
+    assert 'giữ nguyên phần TP khác' in result['text']
+    svc.broker.close_position.assert_not_awaited()
+    svc._insert_management_action.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_explicit_sl_action_only_modifies_tp2_child(native):
+    svc, _, _ = configure_tp_action(native)
+    svc.parser.rule_engine.add_or_update_rule('dời sl tp2', ManagementType.MOVE_SL, {'target': 'TP2'})
+    await svc.process_management_signal(svc.parser.parse('XAUUSD dời sl tp2 về 2655'), 30, None, None)
+    svc.broker.modify_position.assert_awaited_once_with(2, sl=D('2655.00'))
+    svc.broker.close_position.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_close_tp1_does_not_cancel_unrelated_tp2_pending(native):
+    svc, _, live = configure_tp_action(native)
+    svc.parser.rule_engine.add_or_update_rule('đóng tp1', ManagementType.CLOSE, {'target': 'TP1'})
+    svc.broker.get_pending_orders.return_value = [PendingOrderInfo(3, 'XAUUSD', 'BUY_LIMIT', D('1.05'),
+        D('2648'), D('2640'), D('2690'), 'bot-max-entry:tp2', NOW)]
+    svc.get_tickets_for_reply_message = AsyncMock(return_value=[1, 2, 3])
+    await svc.process_management_signal(svc.parser.parse('đóng tp1'), 30, 123, None)
+    svc.broker.close_position.assert_awaited_once_with(1, D('.45'))
+    svc.broker.cancel_order.assert_not_awaited()
+    assert len(live) == 1 and live[0].ticket == 2

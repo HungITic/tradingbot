@@ -13,7 +13,7 @@ from app.broker.base import OrderResult, PositionInfo
 from app.config import database
 from app.models.trade import ManagementAction, Order, Position
 from app.signal.models import ManagementType
-from app.trading.native_tp import branch_comment, native_comment
+from app.trading.native_tp import branch_comment, native_comment, native_key
 
 logger = structlog.get_logger(__name__)
 
@@ -30,6 +30,7 @@ class PositionPolicyMixin:
                 f"Bù giá: BUY +{cfg.breakeven_offset_price}, SELL −{cfg.breakeven_offset_price}.\n"
                 f"\n<b>CHỐT LỜI</b>\nTP1 khi có TP2: {'bật' if cfg.tp1_enabled else 'tắt'}, chốt {cfg.default_partial_close_percent}%.\n"
                 "Lệnh mới: tách khối lượng TP1/TP2, TP chạy trên MT5; đổi tỷ lệ chỉ áp dụng cho lần mở sau.\n"
+                "Rule target=TP1/TP2: chỉ quản lý phần gắn TP đó, tính tỷ lệ trên lot còn lại của từng phần; giữ nguyên phần TP khác.\n"
                 f"Tự dời SL sau chốt: {'bật' if cfg.auto_breakeven_on_partial else 'tắt'}.\n"
                 "Không đủ lot để tách: từ chối mở nhánh. Chính sách thiếu lot TP1 chỉ dùng cho lệnh cũ.\n"
                 "Chỉ có một TP: đóng toàn bộ tại TP đó.\n"
@@ -419,6 +420,15 @@ class PositionPolicyMixin:
 
     def management_selection(self, action, positions, orders, groups, reply_id, raw_text):
         selected = [p for p in positions if action.side is None or p.position_type == action.side.value]
+        if action.target in {'TP1', 'TP2'}:
+            suffix = ':' + action.target.lower()
+            selected = [child for parent in selected for child in (parent.members or (parent,))
+                        if native_key(orders.get(child.ticket))
+                        and orders[child.ticket].comment.endswith(suffix)
+                        and (not child.comment or child.comment == orders[child.ticket].comment)]
+            if not selected:
+                raise ValueError(f'Không có phần {action.target} đang mở với nhãn TP đã lưu; chưa tác động phần TP khác.')
+            return selected
         if action.target != "MIN_ENTRY":
             return selected
         selected = [p for p in selected if self.entry_role(p, orders.get(p.ticket)) == "MIN_ENTRY"]
@@ -493,7 +503,9 @@ class PositionPolicyMixin:
             await self.set_signal_status(signal_id, "SKIPPED", "Các vị thế đã được đóng trước đó")
             await self.notify(f"ℹ️ {reply_tag}: các lệnh đã được đóng trước đó hoặc không còn vị thế phù hợp.")
             return
-        orders = await self.position_orders(positions)
+        tp_scoped = any(a.target in {'TP1', 'TP2'} for a in signal.management_actions)
+        audit_positions = [child for p in positions for child in (p.members or (p,))] if tp_scoped else positions
+        orders = await self.position_orders(audit_positions)
         groups = await self.position_groups(positions, orders)
         # A reply itself is an authoritative group for positions with no DB link.
         if reply_id is not None:
@@ -505,12 +517,17 @@ class PositionPolicyMixin:
             await self.set_signal_status(signal_id, "REJECTED", str(exc))
             await self.notify(f"⛔ {escape(str(exc))}")
             return
-        partial_history, _ = await self.management_history(positions)
+        partial_history, _ = await self.management_history(audit_positions)
         outcomes = []
         closed_tickets = set()
         has_stop = any(a.action_type in {ManagementType.MOVE_SL, ManagementType.BREAKEVEN} for a in signal.management_actions)
         for action, selected in zip(signal.management_actions, selections):
-            if action.action_type == ManagementType.CLOSE:
+            if action.target in {'TP1', 'TP2'}:
+                # Prior actions or broker TP fills may have changed these children.
+                live = {p.ticket: p for p in await self.broker.get_positions()}
+                selected = [live[p.ticket] for p in selected if p.ticket in live
+                            and (not live[p.ticket].comment or live[p.ticket].comment == orders[p.ticket].comment)]
+            if action.action_type == ManagementType.CLOSE and action.target not in {'TP1', 'TP2'}:
                 for order in pending:
                     if action.side is None or order.order_type.startswith(action.side.value):
                         result = await self.broker.cancel_order(order.ticket)
@@ -545,6 +562,8 @@ class PositionPolicyMixin:
                     label = f"Chốt {percentage.normalize():f}%" if partial else "Đóng lệnh"
                     if action.target == "MIN_ENTRY":
                         label += " Min Entry (entry xấu)"
+                    elif action.target in {'TP1', 'TP2'}:
+                        label += f' phần {action.target}'
                     await self.notify(self.format_notification(f"{'✅' if result.success else '❌'} Position Management: {label}\n{reply_tag} · #{pos.ticket} · {escape(result.comment)}", link))
                     if result.success and partial:
                         self._tp1_processed_tickets.add(pos.ticket)
