@@ -151,17 +151,27 @@ class TelegramConsoleMixin:
         currency = await self.display_currency()
         cards = [heading("🗂 Kèo đang chạy", f"Trang {page + 1}/{pages} · {len(groups)} kèo · Cập nhật {now_vietnam().strftime('%H:%M:%S')}")]
         previous_group = None
+        signal_buttons = []
         for index, group, item, is_pending in entries[page * 4:page * 4 + 4]:
             if index != previous_group:
                 positions, orders = group["positions"], group["orders"]
                 pnl = sum(p.profit for p in positions)
                 cards.append(heading(group['name']) + "\n"
                     + f"{len(positions)} vị thế · {len(orders)} lệnh chờ · PnL {escape(money(pnl, currency, signed=True))}")
+                link = group.get('message_link')
+                if link:
+                    cards.append(f'<a href="{escape(link, quote=True)}">Xem signal gốc</a>')
+                signal_id = group.get('signal_id')
+                if signal_id:
+                    row = [Button(f'Đóng kèo #{signal_id}', callback_data=f'sigexit_all_{signal_id}')]
+                    if orders:
+                        row.append(Button(f'Hủy chờ #{signal_id}', callback_data=f'sigexit_pending_{signal_id}'))
+                    signal_buttons.append(row)
                 previous_group = index
             cards.append(pending_card(item) if is_pending else position_card(item, currency))
         if not entries:
             cards.append("Không có kèo đang chạy.")
-        buttons = [[Button("Quản lý vị thế", callback_data="positions_page_0"), Button("Lệnh chờ", callback_data="view_orders")]]
+        buttons = signal_buttons + [[Button("Quản lý vị thế", callback_data="positions_page_0"), Button("Lệnh chờ", callback_data="view_orders")]]
         nav = []
         if page:
             nav.append(Button("← Trước", callback_data=f"setups_{page - 1}"))
@@ -250,6 +260,13 @@ class TelegramConsoleMixin:
                 await query.edit_message_text(
                     f"{'✅' if result.success else '❌'} #{payload['ticket']} · SL: {result.price or '—'}\n{result.comment}",
                     reply_markup=build_status_keyboard(cfg.enabled))
+            elif draft['kind'] == 'signal_exit':
+                try:
+                    result = await self.service.execute_signal_exit(**payload)
+                except Exception as exc:
+                    result = f'⛔ Thao tác kèo chưa hoàn tất: {escape(str(exc))}. Hãy đối chiếu MT5 và mở lại kèo.'
+                await query.edit_message_text(result, parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup([[Button('Kèo đang chạy', callback_data='setups_0')]]))
             elif draft["kind"] == "action":
                 kind = payload["action"]
                 if kind == "partial":
@@ -267,6 +284,16 @@ class TelegramConsoleMixin:
                 await query.edit_message_text(f"Đã thực hiện thành công {ok}/{len(results)} yêu cầu.\n"
                                               + "\n".join(f"#{r.ticket}: {escape(r.comment)}" for r in results if not r.success),
                                               parse_mode=ParseMode.HTML, reply_markup=build_status_keyboard(cfg.enabled))
+            return True
+        if data.startswith('sigexit_'):
+            try:
+                _, mode, signal_id = data.split('_')
+                preview = await self.service.preview_signal_exit(int(signal_id), mode)
+                token = self.new_draft('signal_exit', {k: v for k, v in preview.items() if k != 'text'})
+                await query.edit_message_text(preview['text'], parse_mode=ParseMode.HTML,
+                                              reply_markup=self.draft_keyboard(token))
+            except (ValueError, RuntimeError) as exc:
+                await query.edit_message_text(f'⛔ Không xem trước được kèo: {escape(str(exc))}', parse_mode=ParseMode.HTML)
             return True
         if data.startswith("be_"):
             ticket = int(data.split("_")[1])

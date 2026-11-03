@@ -221,6 +221,152 @@ async def test_symbol_mismatch_does_not_invalidate_latest_limit(limits):
     assert not any(isinstance(c.args[0], RiskEvent) for c in session.add.call_args_list)
 
 
+RECOVERY_RAW = 'SELL XAUUSD 3956 - 3864\nSL:3973\nTP:3943 - 3930'
+
+
+def recovery_quote(svc, price='3956'):
+    svc.broker.get_tick.return_value = TickInfo('XAUUSD', D(price), D(price), datetime.now(timezone.utc))
+
+
+@pytest.mark.asyncio
+async def test_entry_fallback_preview_and_execution_use_only_first_branch_volume(limits):
+    from app.models.signal import ParsedSignal
+    svc, session, _, _, events = limits
+    svc.risk_config.lot_min_entry = D('.8')  # Distinct from default_lot=1.5.
+    recovery_quote(svc)
+    preview = await svc.preview_signal(RECOVERY_RAW)
+    assert preview['can_execute'] and 'Chỉ dùng entry gốc' in preview['text']
+    assert 'Entry duy nhất' in preview['text'] and 'Entry thứ hai' not in preview['text']
+    assert preview['signal_recovery']['order']['entry_min'] == '3956'
+    assert preview['signal_recovery']['order']['entry_max'] is None
+    assert preview['signal_recovery']['volume'] == '0.8'
+    assert not session.add.called
+    svc.broker.open_order.assert_not_awaited()
+    await svc.process_raw_message(RECOVERY_RAW, expected_signal_recovery=preview['signal_recovery'])
+    requests = [c.args[0] for c in svc.broker.open_order.call_args_list]
+    assert len(requests) == 2  # One entry, two existing native TP children.
+    assert sum(r.volume for r in requests) == D('.8')
+    assert all(r.order_type == 'SELL' and r.price == D('3956') for r in requests)
+    assert all(r.comment.startswith('bot-min-entry:') for r in requests)
+    assert all(r.sl == D('3973.5') for r in requests)
+    assert {r.tp for r in requests} == {D('3943.5'), D('3930.5')}
+    original = next(c.args[0] for c in session.add.call_args_list if isinstance(c.args[0], ParsedSignal))
+    assert original.entry_min == D('3864') and original.entry_max == D('3956')
+    recovered = next(c.args[0] for c in session.add.call_args_list
+                     if isinstance(c.args[0], RiskEvent) and c.args[0].event_type == 'SIGNAL_RECOVERED')
+    assert recovered.details['order']['entry_max'] is None
+    assert recovered.details['quote']['bid'] == '3956'
+    assert events.index('commit') < events.index('open')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('broken,fixed,level', [
+    ('SL:3973', 'SL:3873', 'sl'),
+    ('TP:3943 - 3930', 'TP:4943 - 3930', 'tp1'),
+    ('TP:3943 - 3930', 'TP:3943 - 4930', 'tp2'),
+])
+async def test_sl_tp_errors_only_notify_without_suggestions_or_execution(limits, broken, fixed, level):
+    svc, session, _, _, _ = limits
+    recovery_quote(svc)
+    raw = RECOVERY_RAW.replace('3956 - 3864', '3956 - 3964').replace(broken, fixed)
+    preview = await svc.preview_signal(raw)
+    assert not preview['can_execute'] and 'signal_recovery' not in preview
+    assert 'Sửa SL/TP' not in preview['text']
+    assert 'gửi lại SL/TP đúng' in preview['text']
+    await svc.process_raw_message(raw)
+    svc.broker.open_order.assert_not_awaited()
+    svc.broker.close_position.assert_not_awaited()
+    svc.broker.cancel_order.assert_not_awaited()
+    svc.broker.get_tick.assert_not_awaited()
+    assert not svc._pending_overrides
+    assert not any(isinstance(c.args[0], RiskEvent) and c.args[0].event_type == 'SIGNAL_RECOVERED'
+                   for c in session.add.call_args_list)
+    assert svc.set_signal_status.call_args.args[1] == 'REJECTED'
+    assert 'gửi lại SL/TP đúng' in svc.notify.call_args.args[0]
+    assert not svc.notify.call_args.kwargs.get('reply_markup')
+
+
+@pytest.mark.asyncio
+async def test_recovered_entry_retains_slippage_limit_policy(limits):
+    svc, _, _, _, _ = limits
+    recovery_quote(svc, '3954')
+    await svc.process_raw_message(RECOVERY_RAW)
+    requests = [c.args[0] for c in svc.broker.open_order.call_args_list]
+    assert len(requests) == 2
+    assert all(r.order_type == 'SELL_LIMIT' and r.price == D('3956') for r in requests)
+    assert not svc._pending_overrides
+
+
+@pytest.mark.asyncio
+async def test_recovery_keeps_other_risk_approval_and_frozen_entry(limits):
+    svc, _, _, _, _ = limits
+    recovery_quote(svc)
+    svc.risk_config.max_open_positions = 1
+    await svc.process_raw_message(RECOVERY_RAW)
+    svc.broker.open_order.assert_not_awaited()
+    approval_id = next(iter(svc._pending_overrides))
+    assert list(svc._pending_overrides[approval_id]['orders']) == ['min']
+    await svc.execute_override_order(approval_id, 'min')
+    assert svc.broker.open_order.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure', ['disabled', 'stale', 'wrong_symbol', 'far', 'audit', 'pinned', 'expired'])
+async def test_recovery_failure_has_no_broker_mutations(limits, monkeypatch, failure):
+    from datetime import timedelta
+    svc, _, _, _, _ = limits
+    recovery_quote(svc)
+    kwargs = {}
+    if failure == 'disabled':
+        svc.risk_config.signal_recovery_enabled = False
+    elif failure == 'stale':
+        svc.broker.get_tick.return_value.time -= timedelta(minutes=5)
+    elif failure == 'wrong_symbol':
+        svc.broker.get_tick.return_value.symbol = 'EURUSD'
+    elif failure == 'far':
+        recovery_quote(svc, '4100')
+    elif failure == 'audit':
+        monkeypatch.setattr('app.trading.signal_recovery.record_signal_recovery',
+                            AsyncMock(side_effect=RuntimeError('commit failed')))
+    elif failure == 'pinned':
+        preview = await svc.preview_signal(RECOVERY_RAW)
+        kwargs['expected_signal_recovery'] = preview['signal_recovery']
+        svc.risk_config.lot_min_entry = D('.8')
+    elif failure == 'expired':
+        kwargs['signal_time'] = datetime.now(timezone.utc) - timedelta(hours=1)
+    await svc.process_raw_message(RECOVERY_RAW, **kwargs)
+    svc.broker.open_order.assert_not_awaited()
+    svc.broker.close_position.assert_not_awaited()
+    svc.broker.cancel_order.assert_not_awaited()
+    assert svc.set_signal_status.call_args.args[1] == 'REJECTED'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('uncertain', [False, True])
+async def test_broker_rejection_never_triggers_signal_recovery_retry(limits, uncertain):
+    svc, _, _, _, _ = limits
+    recovery_quote(svc)
+    svc.broker.open_order.side_effect = None
+    svc.broker.open_order.return_value = OrderResult(False, retcode=10016, comment='Invalid stops', raw={'uncertain': uncertain})
+    await svc.process_raw_message(RECOVERY_RAW.replace('TP:3943 - 3930', 'TP:3943'))
+    assert svc.broker.open_order.await_count == 1
+    if uncertain:
+        assert not svc.risk_config.enabled
+
+
+@pytest.mark.asyncio
+async def test_replay_can_recover_old_signal_but_retains_preview_confirmation(limits):
+    from datetime import timedelta
+    svc, _, _, _, _ = limits
+    recovery_quote(svc)
+    kwargs = {'signal_time': datetime.now(timezone.utc) - timedelta(days=30), 'skip_signal_expiry_check': True}
+    preview = await svc.preview_signal(RECOVERY_RAW, **kwargs)
+    assert preview['can_execute']
+    svc.broker.open_order.assert_not_awaited()
+    await svc.process_raw_message(RECOVERY_RAW, expected_signal_recovery=preview['signal_recovery'], **kwargs)
+    assert svc.broker.open_order.await_count == 2
+
+
 @pytest.mark.asyncio
 async def test_missing_persistent_policy_blocks_placing_limits(limits):
     svc, _, result, _, _ = limits

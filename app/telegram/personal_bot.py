@@ -237,7 +237,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
             "<b>📊 Giao dịch &amp; Vị thế:</b>\n"
             "/status — Tổng quan hệ thống\n"
             "/inbox — Hộp thư tín hiệu và lý do xử lý\n"
-            "/setups — Các kèo đang chạy\n"
+            "/setups — Các kèo đang chạy; đóng vị thế / hủy chờ theo signal\n"
             "/positions — Vị thế đang mở\n"
             "/history [ngày] — Lịch sử lệnh đã đóng\n"
             "/stats [ngày] — Thống kê Win/Loss\n"
@@ -1100,6 +1100,8 @@ class PersonalTelegramBot(TelegramConsoleMixin):
             if len(fetch_res) > 8:
                 payload['related_message_path'] = fetch_res[8]
             preview = await self.service.preview_signal(**payload)
+            if preview.get('signal_recovery'):
+                payload['expected_signal_recovery'] = preview['signal_recovery']
             if preview.get('management_scope'):
                 payload['management_scope'] = preview['management_scope']
             token = self.new_draft("signal", payload)

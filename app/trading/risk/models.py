@@ -75,6 +75,13 @@ class RiskConfig(BaseModel):
     lot_max_entry: Decimal = Decimal("0.01")
     max_slippage_entry: Decimal = Decimal("1.0")  # Dung sai tối đa khi giá chạy bất lợi (1 giá / 100 points)
 
+    # Recovery is restricted to rejected XAUUSD signals, before any MT5 send.
+    signal_recovery_enabled: bool = True
+    recovery_max_entry_gap: Decimal = Decimal('20')
+    recovery_max_quote_distance: Decimal = Decimal('30')
+    recovery_max_sl_distance: Decimal = Decimal('100')
+    recovery_max_tp_distance: Decimal = Decimal('200')
+
     # Broker Server Timezone Offset
     broker_utc_offset_hours: int = 3  # Chênh lệch UTC của sàn (PUPrime EET/EEST: +3 hè, +2 đông)
 
@@ -96,6 +103,10 @@ class RiskConfig(BaseModel):
 
     @model_validator(mode="after")
     def check_limits(self):
+        recovery_limits = (self.recovery_max_entry_gap, self.recovery_max_quote_distance,
+                           self.recovery_max_sl_distance, self.recovery_max_tp_distance)
+        if any(not value.is_finite() or value <= 0 for value in recovery_limits):
+            raise ValueError('Ngưỡng xử lý signal lỗi phải hữu hạn và lớn hơn 0')
         lots = (self.min_lot, self.max_lot, self.default_lot, self.lot_min_entry, self.lot_max_entry)
         if any(not value.is_finite() or value <= 0 for value in lots):
             raise ValueError("Lot phải là số hữu hạn lớn hơn 0")

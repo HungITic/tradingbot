@@ -266,6 +266,10 @@ def test_settings_menu_exposes_every_editable_runtime_field_once():
     ('default_partial_close_percent', '0', D('0')),
     ('repeat_partial_close_keywords', 'chốt bớt entry xấu, chốt bớt 1 phần', ['chốt bớt entry xấu', 'chốt bớt 1 phần']),
     ('repeat_partial_close_keywords', '[]', []),
+    ('recovery_max_entry_gap', '15', D('15')),
+    ('recovery_max_quote_distance', '10', D('10')),
+    ('recovery_max_sl_distance', '80', D('80')),
+    ('recovery_max_tp_distance', '150', D('150')),
 ])
 async def test_added_settings_input_preview_and_confirm(bot, key, value, expected):
     from unittest.mock import patch
@@ -295,6 +299,37 @@ async def test_require_tp_toggle_is_only_applied_after_confirmation(bot):
     keyboard = update.callback_query.edit_message_text.call_args.kwargs['reply_markup']
     await bot.handle_console_callback(update, context, keyboard.inline_keyboard[0][0].callback_data)
     assert bot.service.risk_config.require_tp
+
+
+@pytest.mark.asyncio
+async def test_recovery_toggle_is_only_applied_after_confirmation(bot):
+    update, context = callback()
+    await bot.handle_console_callback(update, context, 'cfg_signal_recovery_enabled')
+    assert bot.service.risk_config.signal_recovery_enabled
+    keyboard = update.callback_query.edit_message_text.call_args.kwargs['reply_markup']
+    await bot.handle_console_callback(update, context, keyboard.inline_keyboard[0][0].callback_data)
+    assert not bot.service.risk_config.signal_recovery_enabled
+
+
+@pytest.mark.asyncio
+async def test_replay_pins_recovery_plan_until_confirmation(bot):
+    from unittest.mock import patch
+    raw = 'SELL XAUUSD 3956 - 3864\nSL:3973\nTP:3943 - 3930'
+    plan = {'mode': 'single_entry', 'order': {'entry_min': '3956', 'entry_max': None}, 'volume': '.01'}
+    bot.service.preview_signal = AsyncMock(return_value={'text': 'Xem trước', 'can_execute': True,
+                                                        'signal_recovery': plan})
+    fetched = (raw, 1, -100123, 'https://t.me/test/1', False, None, datetime.now(timezone.utc))
+    status = SimpleNamespace(edit_text=AsyncMock())
+    update = SimpleNamespace(effective_message=SimpleNamespace(reply_text=AsyncMock(return_value=status)))
+    with patch('app.telegram.signal_listener.signal_listener.fetch_message_by_link', AsyncMock(return_value=fetched)):
+        await bot._execute_replay_link(update, SimpleNamespace(user_data={}), 'https://t.me/test/1')
+    token = next(iter(bot._drafts))
+    payload = bot._drafts[token]['payload']
+    assert payload['expected_signal_recovery'] == plan
+    bot.service.process_raw_message.assert_not_awaited()
+    update, context = callback()
+    await bot.handle_console_callback(update, context, 'draft_ok_' + token)
+    bot.service.process_raw_message.assert_awaited_once_with(**payload)
 
 
 @pytest.mark.asyncio
@@ -414,6 +449,43 @@ async def test_history_callbacks_support_new_pages_and_old_filter_buttons(bot):
         update.callback_query.data = data
         await bot.handle_callback.__wrapped__(bot, update, context)
         assert expected in update.callback_query.edit_message_text.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_setups_buttons_use_persistent_signal_ids_and_hide_unlinked_actions(bot):
+    bot.service.get_setup_cards = AsyncMock(return_value=[
+        {'signal_id': 10, 'name': 'Kèo #10', 'positions': [position(1)], 'orders': [],
+         'message_link': 'https://t.me/test/1'},
+        {'signal_id': 20, 'name': 'Kèo #20', 'positions': [position(2)], 'orders': []},
+        {'signal_id': None, 'name': 'Chưa liên kết', 'positions': [position(3)], 'orders': []}])
+    text, keyboard = await bot.setups_view()
+    data = [b.callback_data for row in keyboard.inline_keyboard for b in row]
+    assert 'sigexit_all_10' in data and 'sigexit_all_20' in data
+    assert not any('None' in d or 'sigexit_all_3' == d for d in data)
+    assert 'Xem signal gốc' in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('confirm', [False, True])
+async def test_signal_exit_requires_confirmation_and_consumes_draft_once(bot, confirm):
+    preview = {'text': 'Đóng kèo #10', 'signal_id': 10, 'mode': 'all',
+               'account': {'login': 1, 'server': 'Demo'}, 'members': {'100': '.1'},
+               'created_at': datetime.now(timezone.utc).isoformat()}
+    bot.service.preview_signal_exit = AsyncMock(return_value=preview)
+    bot.service.execute_signal_exit = AsyncMock(return_value='Đã đóng kèo')
+    update, context = callback()
+    await bot.handle_console_callback(update, context, 'sigexit_all_10')
+    bot.service.preview_signal_exit.assert_awaited_once_with(10, 'all')
+    bot.service.execute_signal_exit.assert_not_awaited()
+    token = next(iter(bot._drafts))
+    payload = bot._drafts[token]['payload']
+    data = ('draft_ok_' if confirm else 'draft_no_') + token
+    await bot.handle_console_callback(update, context, data)
+    await bot.handle_console_callback(update, context, 'draft_ok_' + token)
+    if confirm:
+        bot.service.execute_signal_exit.assert_awaited_once_with(**payload)
+    else:
+        bot.service.execute_signal_exit.assert_not_awaited()
 
 
 def test_compact_cards_escape_broker_text_and_keep_precise_prices():

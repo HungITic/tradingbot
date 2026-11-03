@@ -64,7 +64,9 @@ class ReplyChainMixin:
         valid, reason = SignalValidator(self.service.risk_config.require_sl,
                                          self.service.risk_config.require_tp).validate_signal(parsed)
         if not valid:
-            raise ReplyChainError(f'Tin #{message_id} chứa tín hiệu mở lệnh không hợp lệ: {reason}')
+            from app.signal.recovery import recoverable_source
+            if not recoverable_source(order, self.service.risk_config):
+                raise ReplyChainError(f'Tin #{message_id} chứa tín hiệu mở lệnh không hợp lệ: {reason}')
         return True
 
     async def load_reentry_origin(self, chat_id, message_id):

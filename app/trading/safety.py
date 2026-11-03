@@ -26,7 +26,7 @@ class TradingSafetyMixin:
             levels[name] = value + offset if value is not None else None
         return signal.model_copy(update={"new_order": order.model_copy(update=levels)})
 
-    def signal_problem(self, signal, signal_time: datetime | None = None, *, skip_signal_expiry_check: bool = False) -> str | None:
+    def signal_time_problem(self, signal_time: datetime | None, *, skip_signal_expiry_check: bool = False) -> str | None:
         if signal_time is not None:
             if signal_time.tzinfo is None:
                 return "Thời gian tín hiệu phải có múi giờ."
@@ -35,6 +35,12 @@ class TradingSafetyMixin:
                 return "Thời gian tín hiệu nằm trong tương lai; cần kiểm tra đồng hồ."
             if not skip_signal_expiry_check and age > self.risk_config.signal_expire_seconds:
                 return f"Tín hiệu đã hết hạn ({int(age)} giây; giới hạn {self.risk_config.signal_expire_seconds} giây)."
+        return None
+
+    def signal_problem(self, signal, signal_time: datetime | None = None, *, skip_signal_expiry_check: bool = False) -> str | None:
+        time_problem = self.signal_time_problem(signal_time, skip_signal_expiry_check=skip_signal_expiry_check)
+        if time_problem:
+            return time_problem
         if signal.management_actions and self.risk_config.require_explicit_close:
             ambiguous = {"chốt nha", "chốt nhé", "chốt đi", "chốt lời", "dừng"}
             if any(a.action_type.value == "CLOSE" and a.keyword in ambiguous for a in signal.management_actions):
@@ -42,6 +48,65 @@ class TradingSafetyMixin:
         validator = SignalValidator(self.risk_config.require_sl, self.risk_config.require_tp)
         valid, reason = validator.validate_signal(signal)
         return None if valid else reason
+
+    async def prepare_signal(self, signal, signal_time=None, *, skip_signal_expiry_check=False,
+                             expected_signal_recovery=None):
+        """Recover a rejected source once, then run the unchanged execution checks."""
+        prepared = self.adjusted_signal_levels(signal)
+        problem = self.signal_problem(prepared, signal_time, skip_signal_expiry_check=skip_signal_expiry_check)
+        recovery = None
+        time_problem = self.signal_time_problem(signal_time, skip_signal_expiry_check=skip_signal_expiry_check)
+        validator = SignalValidator(self.risk_config.require_sl, self.risk_config.require_tp)
+        from app.signal.recovery import entry_recovery_candidate
+        if (problem and not time_problem and signal.new_order and self.risk_config.signal_recovery_enabled
+                and entry_recovery_candidate(signal.new_order, self.risk_config)
+                and not validator.validate_new_order(signal.new_order)[0]):
+            try:
+                from app.signal.recovery import recover_order
+                tick = await self.checked_tick(signal.new_order.symbol)
+                if tick.symbol != signal.new_order.symbol:
+                    raise ValueError('Báo giá không khớp symbol của signal')
+                info = await self.broker.get_symbol_info(signal.new_order.symbol)
+                quote = tick.ask if signal.new_order.action == OrderAction.BUY else tick.bid
+                order, recovery = recover_order(signal.new_order, quote, self.risk_config, info.point)
+                if recovery:
+                    recovery['quote'] = {'bid': str(tick.bid), 'ask': str(tick.ask), 'time': tick.time.isoformat()}
+                    if recovery['mode'] == 'single_entry':
+                        recovery['volume'] = str(self.risk_config.lot_min_entry if self.risk_config.enable_dual_entry
+                                                 else self.risk_config.default_lot)
+                    signal = signal.model_copy(update={'new_order': order,
+                        'metadata': {**signal.metadata, 'signal_recovery': recovery}})
+                    prepared = self.adjusted_signal_levels(signal)
+                    problem = self.signal_problem(prepared, signal_time, skip_signal_expiry_check=skip_signal_expiry_check)
+            except Exception as exc:
+                problem = f'{problem}. Xử lý ngoại lệ: {exc}'
+        if problem and not time_problem and signal.new_order:
+            problem += ' Bot chưa vào lệnh. Bạn hãy kiểm tra và gửi lại SL/TP đúng.'
+        fingerprint = self.recovery_fingerprint(recovery)
+        if expected_signal_recovery is not None and fingerprint != expected_signal_recovery:
+            problem = 'Phương án xử lý signal lỗi đã thay đổi so với bản xem trước; hãy xem trước lại'
+        return prepared, problem, recovery
+
+    @staticmethod
+    def recovery_fingerprint(recovery):
+        return ({key: recovery.get(key) for key in ('mode', 'order', 'volume')} if recovery else None)
+
+    def signal_entry_volumes(self, signal):
+        recovery = signal.metadata.get('signal_recovery')
+        if recovery and recovery['mode'] == 'single_entry':
+            return [Decimal(recovery['volume'])]
+        order = signal.new_order
+        dual = (self.risk_config.enable_dual_entry and order.entry_max is not None
+                and order.entry_max != order.entry_min)
+        return ([self.risk_config.lot_min_entry, self.risk_config.lot_max_entry] if dual
+                else [self.risk_config.default_lot])
+
+    @staticmethod
+    def recovery_text(recovery):
+        old = recovery['original']
+        return (f'⚠️ Entry lỗi: {escape(str(old["entry_min"]))} – {escape(str(old["entry_max"]))}. '
+                f'Chỉ dùng entry gốc gần giá hiện tại: {escape(recovery["order"]["entry_min"])} · '
+                f'{escape(recovery["volume"])} lot; bỏ entry còn lại, không cộng dồn lot.')
 
     async def daily_risk_snapshot(self, account) -> tuple[Decimal, Decimal]:
         """Use all account deals, including fees and balance operations, on the VN day."""
@@ -84,9 +149,11 @@ class TradingSafetyMixin:
         """Does not write the DB, send notifications, or execute broker operations."""
         signal = self.parser.parse(raw_text)
         signal.is_reentry = is_reentry
-        signal = self.adjusted_signal_levels(signal)
-        problem = self.signal_problem(signal, signal_time, skip_signal_expiry_check=skip_signal_expiry_check)
+        signal, problem, recovery = await self.prepare_signal(signal, signal_time,
+            skip_signal_expiry_check=skip_signal_expiry_check)
         lines = [heading("🔎 Xem trước tín hiệu", "Chưa thực thi giao dịch"), ""]
+        if recovery:
+            lines.append(self.recovery_text(recovery))
         origin = kwargs.get('reentry_origin')
         if is_reentry and isinstance(origin, dict):
             from app.telegram.utils import construct_telegram_message_link
@@ -108,13 +175,13 @@ class TradingSafetyMixin:
             lines.append("Không xác định được hành động rõ ràng. Tin mơ hồ/điều kiện cần được làm rõ.")
         elif signal.new_order:
             order = signal.new_order
-            dual = (self.risk_config.enable_dual_entry and order.entry_max is not None
-                    and order.entry_max != order.entry_min)
-            volumes = ([self.risk_config.lot_min_entry, self.risk_config.lot_max_entry] if dual
-                       else [self.risk_config.default_lot])
+            volumes = self.signal_entry_volumes(signal)
+            entry_fields = ([field('Entry duy nhất', display_price(order.entry_min), code=True)]
+                            if recovery and recovery['mode'] == 'single_entry' else [
+                                field('Entry thứ nhất', display_price(order.entry_min), code=True),
+                                field('Entry thứ hai', display_price(order.entry_max or order.entry_min), code=True)])
             lines += ["", heading(f"{order.symbol} · {order.action.value}"), "",
-                section("VÙNG VÀO LỆNH", field("Entry thứ nhất", display_price(order.entry_min), code=True),
-                    field("Entry thứ hai", display_price(order.entry_max or order.entry_min), code=True)), "",
+                section("VÙNG VÀO LỆNH", *entry_fields), "",
                 section("BẢO VỆ LỆNH", field("SL · Dừng lỗ", display_price(order.stop_loss), code=True),
                     field("TP1", display_price(order.take_profit), code=True), field("TP2", display_price(order.take_profit_2), code=True)), "",
                 "SL/TP đã bù 0.5 giá từ tín hiệu: BUY trừ 0.5 · SELL cộng 0.5.", "",
@@ -250,6 +317,8 @@ class TradingSafetyMixin:
         else:
             lines.extend(["", section("✅ KẾT QUẢ KIỂM TRA", "Đủ điều kiện để gửi vào luồng kiểm tra thực thi.")])
         result = {"text": "\n".join(lines), "can_execute": can_execute}
+        if recovery:
+            result['signal_recovery'] = self.recovery_fingerprint(recovery)
         if management_scope:
             result['management_scope'] = {k: v for k, v in management_scope.items() if k != 'tickets'}
         return result
@@ -320,25 +389,3 @@ class TradingSafetyMixin:
             stmt = stmt.where(Signal.status == status)
         async with get_session() as session:
             return list((await session.execute(stmt)).all())
-
-    async def get_setup_cards(self) -> list[dict]:
-        """Group live broker state by the recorded signal; never infer a group by symbol."""
-        from sqlalchemy import select
-        from app.config.database import get_session
-        from app.models.trade import Order
-        positions = await self.get_open_positions()
-        orders = await self.broker.get_pending_orders()
-        tickets = [x.ticket for x in positions + orders]
-        memberships = {}
-        if tickets:
-            async with get_session() as session:
-                rows = await session.execute(select(Order.mt5_ticket, Order.signal_id)
-                                             .where(Order.mt5_ticket.in_(tickets)))
-                memberships = dict(rows.all())
-        groups = {}
-        for item in positions + orders:
-            sig_id = memberships.get(item.ticket)
-            key = f"Kèo #{sig_id}" if sig_id else f"Chưa liên kết · #{item.ticket}"
-            group = groups.setdefault(key, {"name": key, "positions": [], "orders": []})
-            group["positions" if hasattr(item, "profit") else "orders"].append(item)
-        return list(groups.values())

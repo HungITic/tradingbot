@@ -47,9 +47,10 @@ from app.trading.close_reporting import CloseReportingMixin
 from app.trading.native_tp import NativeTPMixin, branch_comment, native_comment
 from app.trading.management_scope import ManagementScopeMixin
 from app.trading.slippage_limits import SlippageLimitMixin
+from app.trading.signal_actions import SignalActionsMixin
 
 
-class TradingService(SlippageLimitMixin, ManagementScopeMixin, NativeTPMixin, CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixin):
+class TradingService(SignalActionsMixin, SlippageLimitMixin, ManagementScopeMixin, NativeTPMixin, CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixin):
     """Core trade coordinator and order router."""
 
     def __init__(
@@ -778,6 +779,7 @@ class TradingService(SlippageLimitMixin, ManagementScopeMixin, NativeTPMixin, Cl
         reentry_origin: dict | None = None,
         management_scope: dict | None = None,
         related_message_path: list[int] | None = None,
+        expected_signal_recovery: dict | None = None,
     ) -> None:
         """Full pipeline: Raw message -> Parse -> Risk -> Execute -> Notify."""
         logger.info(
@@ -860,12 +862,21 @@ class TradingService(SlippageLimitMixin, ManagementScopeMixin, NativeTPMixin, Cl
 
         # Preserve source levels in the audit above and adjust once for execution.
         # Override requests retain these adjusted levels without shifting them again.
-        signal = self.adjusted_signal_levels(signal)
-        problem = self.signal_problem(signal, signal_time, skip_signal_expiry_check=skip_signal_expiry_check)
+        signal, problem, recovery = await self.prepare_signal(signal, signal_time,
+            skip_signal_expiry_check=skip_signal_expiry_check, expected_signal_recovery=expected_signal_recovery)
         if problem:
             await self.set_signal_status(signal_db_id, "REJECTED", problem)
             await self.notify(self.format_notification(f"⛔ <b>Signal Rejected</b>\n{escape(problem)}", message_link))
             return
+        if recovery:
+            try:
+                from app.trading.signal_recovery import record_signal_recovery
+                await record_signal_recovery(signal_db_id, recovery)
+            except Exception as exc:
+                await self.set_signal_status(signal_db_id, 'REJECTED', str(exc))
+                await self.notify('⛔ Không lưu được quyết định xử lý signal lỗi; chưa thực thi.')
+                return
+            await self.notify(self.format_notification(self.recovery_text(recovery), message_link))
         if is_reentry and reentry_origin and reentry_origin.get('method') == 'latest_signal':
             from app.telegram.utils import construct_telegram_message_link
             root_link = construct_telegram_message_link(chat_id, reentry_origin.get('root_message_id'))
@@ -922,7 +933,7 @@ class TradingService(SlippageLimitMixin, ManagementScopeMixin, NativeTPMixin, Cl
 
             sig_id = signal_db_id or int(time.time() * 1000)
             pending_reqs = {}
-            vol_min = self.risk_config.lot_min_entry if has_dual_entry else self.risk_config.default_lot
+            vol_min = self.signal_entry_volumes(signal)[0]
             vol_max = self.risk_config.lot_max_entry
 
             if min_entry is not None:
@@ -1018,7 +1029,7 @@ class TradingService(SlippageLimitMixin, ManagementScopeMixin, NativeTPMixin, Cl
                 await self.notify(self.format_notification(msg, message_link))
                 return
 
-            if not has_dual_entry:
+            if not has_dual_entry and not (recovery and recovery['mode'] == 'single_entry'):
                 vol_min = decision.calculated_lot
             
             # Check if price has completely exceeded the entire range (e.g. SELL and price > max_entry, or BUY and price < max_entry)
@@ -1065,7 +1076,7 @@ class TradingService(SlippageLimitMixin, ManagementScopeMixin, NativeTPMixin, Cl
                 tp=signal.new_order.take_profit_2 or signal.new_order.take_profit,
                 tp1=signal.new_order.take_profit,
                 tp2=signal.new_order.take_profit_2,
-                comment="bot-min-entry" if has_dual_entry else "bot-market",
+                comment="bot-min-entry" if has_dual_entry or (recovery and recovery['mode'] == 'single_entry') else "bot-market",
                     signal_id=signal_db_id,
             )
             problem = self.check_request(order_req_1)
@@ -1747,6 +1758,12 @@ class TradingService(SlippageLimitMixin, ManagementScopeMixin, NativeTPMixin, Cl
                     "duplicate_timeout_seconds": int(config.duplicate_timeout_seconds),
                     "signal_expire_seconds": int(config.signal_expire_seconds),
                     "broker_utc_offset_hours": int(config.broker_utc_offset_hours),
+                },
+                ("signal", "recovery"): {
+                    "signal_recovery_enabled": bool(config.signal_recovery_enabled),
+                    **{key: str(getattr(config, key)) for key in (
+                        'recovery_max_entry_gap', 'recovery_max_quote_distance',
+                        'recovery_max_sl_distance', 'recovery_max_tp_distance')},
                 },
             }
 

@@ -22,18 +22,28 @@ CONFIG_FIELDS = {
     "allow_multiple_partial_closes": "Cho phép chốt một phần nhiều lần",
     "repeat_partial_close_keywords": "Câu/từ khóa được phép chốt tiếp",
     "max_daily_loss_percent": "Giới hạn lỗ ngày (%)", "signal_expire_seconds": "Thời hạn tín hiệu (giây)",
+    "signal_recovery_enabled": "Xử lý ngoại lệ signal XAU lỗi",
+    "recovery_max_entry_gap": "Khoảng entry tối đa khi xử lý lỗi",
+    "recovery_max_quote_distance": "Khoảng entry tới giá hiện tại khi xử lý lỗi",
+    "recovery_max_sl_distance": "Khoảng SL tối đa khi xử lý entry lỗi",
+    "recovery_max_tp_distance": "Khoảng TP tối đa khi xử lý entry lỗi",
 }
 CONFIG_SECTIONS = {
     "entry": ("🎯 Vào lệnh", {"enabled", "enable_dual_entry", "max_slippage_entry", "lot_min_entry", "lot_max_entry", "default_lot", "min_lot", "max_lot"}),
     "sl": ("🛡 SL và hòa vốn", {"breakeven_offset_price", "breakeven_only_improve", "auto_breakeven_on_partial"}),
     "profit": ("✂️ Chốt lời và nhánh lệnh", {"default_partial_close_percent", "bad_entry_partial_close_percent", "tp1_enabled", "tp1_min_volume_action", "auto_cancel_pending_on_full_close", "allow_multiple_partial_closes", "repeat_partial_close_keywords"}),
     "risk": ("⚖️ Giới hạn tài khoản", {"require_sl", "require_tp", "allowed_symbols", "max_open_positions", "max_daily_loss_percent"}),
-    "signal": ("📥 Xử lý tín hiệu", {"generic_partial_uses_default", "require_explicit_close", "signal_expire_seconds", "duplicate_timeout_seconds"}),
+    "signal": ("📥 Xử lý tín hiệu", {"generic_partial_uses_default", "require_explicit_close", "signal_expire_seconds", "duplicate_timeout_seconds", "signal_recovery_enabled", "recovery_max_entry_gap", "recovery_max_quote_distance", "recovery_max_sl_distance", "recovery_max_tp_distance"}),
     "broker": ("🕒 Giờ sàn", {"broker_utc_offset_hours"}),
 }
 
 
 CONFIG_HELP = {
+    "signal_recovery_enabled": "Chỉ xử lý entry lỗi của signal XAUUSD trước khi gửi MT5: giữ một entry gốc gần giá hiện tại, bỏ entry còn lại; dùng lot Min Entry nếu đang bật hai entry. SL/TP lỗi: chỉ thông báo và dừng để bạn gửi lại mức đúng; không tự sửa hoặc đề xuất giá. Không tự thử lại lỗi gửi MT5.",
+    "recovery_max_entry_gap": "Ngưỡng theo đơn vị giá XAU, mặc định 20. Signal đã lỗi và hai entry cách nhau hơn ngưỡng này: xét bỏ entry xa giá hiện tại. Không đổi signal đang hợp lệ.",
+    "recovery_max_quote_distance": "Entry được giữ phải cách giá hiện tại không quá ngưỡng này; mặc định 30 giá XAU. Dùng báo giá mới lúc xử lý; replay ghim phương án đã xem trước.",
+    "recovery_max_sl_distance": "SL sau xử lý lỗi phải cách mọi entry còn lại không quá ngưỡng này, mặc định 100 giá XAU. Không tự thu hẹp SL của signal hợp lệ.",
+    "recovery_max_tp_distance": "Mỗi TP sau xử lý lỗi phải cách mọi entry còn lại không quá ngưỡng này, mặc định 200 giá XAU. Các ngưỡng xử lý lỗi phải lớn hơn 0.",
     "allow_multiple_partial_closes": "Quyền chốt tiếp mặc định cho signal và lệnh chốt tay. Rule có repeat=true/false được ưu tiên riêng, không cần sửa cấu hình chung. Rule chưa đặt repeat vẫn dùng cấu hình này và danh sách ngoại lệ cũ. Signal ngược chiều tự chốt 50% và đóng 100% giữ quy tắc riêng.",
     "repeat_partial_close_keywords": "Danh sách ngoại lệ cũ. Nên dùng /rule add \"chốt bớt entry xấu\" PARTIAL_CLOSE 30 repeat=true để cài hành động, tỷ lệ và quyền chốt tiếp cùng lúc. Rule đã đặt repeat=true/false ưu tiên hơn danh sách này. Nếu vẫn dùng danh sách: nhập các cụm cách nhau bằng dấu phẩy hoặc xuống dòng, lưu thay toàn bộ; [] để xóa. Tin vẫn phải được parser nhận diện là chốt một phần; không thay đổi cơ chế chống xử lý trùng.",
     "max_slippage_entry": "Mức trượt giá bất lợi tối đa để vào market. Vượt mức này: tự đặt BUY_LIMIT/SELL_LIMIT tại entry signal, không chờ duyệt trượt giá. Có action liên quan đến kèo thì hủy các limit đó còn chờ; không đóng phần đã khớp.",

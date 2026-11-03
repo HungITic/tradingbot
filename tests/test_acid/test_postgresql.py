@@ -329,6 +329,107 @@ async def test_notification_cleanup_removes_only_old_sent_rows(pg):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('state', ['sql_null', 'json_null', 'object'])
+async def test_signal_recovery_audit_keeps_original_prices_and_metadata(pg, state):
+    from sqlalchemy import null
+    from app.models.signal import Signal, ParsedSignal
+    from app.models.risk import RiskEvent
+    from app.trading.signal_recovery import record_signal_recovery
+    before = {'message_link': 'https://t.me/test/1', 'reentry_origin': {'root_message_id': 1}}
+    metadata = null() if state == 'sql_null' else None if state == 'json_null' else before
+    async with database.get_session() as session:
+        source = Signal(raw_message='original signal', message_type='NEW_ORDER')
+        session.add(source)
+        await session.flush()
+        source_id = source.id
+        session.add(ParsedSignal(signal_id=source_id, entry_min=D('3864'), entry_max=D('3956'),
+                                 stop_loss=D('3973'), extra_metadata=metadata))
+    decision = {'mode': 'single_entry', 'order': {'entry_min': '3956', 'entry_max': None}}
+    await record_signal_recovery(source_id, decision)
+    async with database.get_session() as session:
+        parsed = await session.scalar(select(ParsedSignal))
+        assert parsed.entry_min == D('3864') and parsed.entry_max == D('3956')
+        assert parsed.stop_loss == D('3973')
+        assert parsed.extra_metadata == {**(before if state == 'object' else {}), 'signal_recovery': decision}
+        event = await session.scalar(select(RiskEvent))
+        assert event.signal_id == source_id and event.details == decision
+
+
+@pytest.mark.asyncio
+async def test_signal_recovery_audit_and_decision_roll_back_together(pg, monkeypatch):
+    from app.models.signal import Signal, ParsedSignal
+    from app.models.risk import RiskEvent
+    from app.trading.signal_recovery import record_signal_recovery
+    original = database.get_session
+    async with original() as session:
+        source = Signal(raw_message='original signal', message_type='NEW_ORDER')
+        session.add(source)
+        await session.flush()
+        source_id = source.id
+        session.add(ParsedSignal(signal_id=source_id, extra_metadata={'message_link': 'original'}))
+    @asynccontextmanager
+    async def fail_commit():
+        async with original() as session:
+            yield session
+            raise RuntimeError('commit failed')
+    monkeypatch.setattr(database, 'get_session', fail_commit)
+    with pytest.raises(RuntimeError, match='commit failed'):
+        await record_signal_recovery(source_id, {'mode': 'single_entry'})
+    async with original() as session:
+        assert (await session.scalar(select(ParsedSignal))).extra_metadata == {'message_link': 'original'}
+        assert await session.scalar(select(func.count()).select_from(RiskEvent)) == 0
+
+
+@pytest.mark.asyncio
+async def test_manual_signal_exit_resolves_position_order_ids_and_preserves_other_signal(pg):
+    from app.broker.base import AccountInfo, OrderResult, PositionInfo, PendingOrderInfo
+    from app.models.signal import Signal
+    from app.models.trade import Position, ManagementAction
+    from app.models.risk import RiskEvent
+    async with database.get_session() as session:
+        first, second = Signal(raw_message='SELL first'), Signal(raw_message='SELL second')
+        session.add_all([first, second])
+        await session.flush()
+        selected_id, other_id = first.id, second.id
+        for ticket, position_ticket, signal_id in [(101, 11, selected_id), (103, None, selected_id),
+                                                   (201, 21, other_id), (203, None, other_id)]:
+            order = Order(signal_id=signal_id, mt5_ticket=ticket, symbol='XAUUSD',
+                          volume=D('.1'), comment='bot-market', mt5_order_type=1)
+            session.add(order)
+            await session.flush()
+            if position_ticket:
+                session.add(Position(order_id=order.id, mt5_ticket=position_ticket, symbol='XAUUSD'))
+    now = datetime.now(timezone.utc)
+    positions = [PositionInfo(t, 'XAUUSD', D('.1'), D('3956'), D('3950'), D('3973'), D('3943'),
+        D('1'), D('0'), D('0'), 'SELL', now, comment='bot-market') for t in [11, 21]]
+    pending = [PendingOrderInfo(t, 'XAUUSD', 'SELL_LIMIT', D('.1'), D('3964'),
+        D('3973'), D('3943'), 'bot-market', now) for t in [103, 203]]
+    broker = AsyncMock()
+    broker.get_positions.side_effect = lambda: list(positions)
+    broker.get_pending_orders.side_effect = lambda: list(pending)
+    broker.get_history_deals.return_value = []
+    broker.get_account_info.return_value = AccountInfo(1, D('1000'), D('1000'), D('0'), D('1000'), 100, 'Demo', 'USC')
+    async def cancel(ticket):
+        pending[:] = [p for p in pending if p.ticket != ticket]
+        return OrderResult(True, ticket=ticket)
+    async def close(ticket, volume):
+        positions[:] = [p for p in positions if p.ticket != ticket]
+        return OrderResult(True, ticket=ticket, volume=volume)
+    broker.cancel_order.side_effect, broker.close_position.side_effect = cancel, close
+    service = TradingService(broker=broker, risk_config=RiskConfig())
+    preview = await service.preview_signal_exit(selected_id, 'all')
+    assert preview['members'] == {'101': '0.1', '103': '0.1'}
+    await service.execute_signal_exit(**{k: v for k, v in preview.items() if k != 'text'})
+    assert [p.ticket for p in positions] == [21] and [p.ticket for p in pending] == [203]
+    async with database.get_session() as session:
+        actions = (await session.scalars(select(ManagementAction))).all()
+        assert len(actions) == 2 and all(a.signal_id == selected_id for a in actions)
+        assert {a.action_type for a in actions} == {'CLOSE', 'CANCEL'}
+        intent = await session.scalar(select(RiskEvent).where(RiskEvent.event_type == 'SIGNAL_MANUAL_EXIT'))
+        assert intent.signal_id == selected_id
+
+
+@pytest.mark.asyncio
 async def test_schema_migration_preserves_existing_financial_rows(pg):
     from importlib import import_module
     from alembic.migration import MigrationContext

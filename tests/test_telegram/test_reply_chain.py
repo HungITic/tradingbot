@@ -118,6 +118,25 @@ async def test_invalid_opening_signal_stops_instead_of_selecting_older_signal(li
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('root', [
+    'SELL XAUUSD 3956 - 3864\nSL:3973\nTP:3943 - 3930',
+])
+async def test_recoverable_root_can_be_linked_without_executing_it(listener, root):
+    text, is_reentry, _, origin = await listener.resolve_reentry(msg(2, 'vòng 2', msg(1, root)))
+    assert is_reentry and origin['root_message_id'] == 1 and text.startswith(root)
+    listener.service.broker.get_tick.assert_not_awaited()
+    listener.service.broker.open_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sl_tp_error_in_root_is_not_repaired_by_reentry(listener):
+    root = 'SELL XAUUSD 3956 - 3964\nSL:3873\nTP:3943 - 3930'
+    with pytest.raises(ReplyChainError, match='không hợp lệ'):
+        await listener.resolve_reentry(msg(2, 'vòng 2', msg(1, root)))
+    listener.service.broker.open_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_fetch_replay_uses_same_chain_and_current_timestamp(listener):
     root = msg(1, ROOT)
     root.date = NOW - timedelta(days=30)
