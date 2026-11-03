@@ -236,6 +236,13 @@ class TelegramConsoleMixin:
                 await query.edit_message_text("✅ Đã lưu cấu hình." if all(result.values()) else "❌ Không lưu được cấu hình; giá trị cũ được giữ lại.",
                                               reply_markup=build_risk_config_keyboard(cfg))
             elif draft["kind"] == "signal":
+                if (payload.get('reentry_origin') or {}).get('method') == 'latest_signal':
+                    from app.telegram.signal_listener import signal_listener
+                    try:
+                        await signal_listener.validate_latest_reentry_payload(payload)
+                    except ValueError as exc:
+                        await query.edit_message_text(f'⛔ {exc}')
+                        return True
                 await query.edit_message_text("Đang kiểm tra lại tín hiệu trước thực thi…")
                 await self.service.process_raw_message(**payload)
             elif draft["kind"] == "breakeven":

@@ -92,8 +92,14 @@ class TradingSafetyMixin:
             from app.telegram.utils import construct_telegram_message_link
             link = construct_telegram_message_link(origin.get('chat_id'), origin.get('root_message_id'))
             if link:
-                lines.append(f'Vòng mới từ <a href="{escape(link, quote=True)}">signal gốc</a> · '
-                             f'{max(0, len(origin.get("message_path", [])) - 1)} bước reply')
+                if origin.get('method') == 'latest_signal':
+                    selected = construct_telegram_message_link(origin.get('chat_id'), origin.get('selected_message_id'))
+                    lines.append(f'Không có reply: vào lại theo <a href="{escape(selected, quote=True)}">signal gần nhất</a> '
+                                 f'trước tin vòng mới; <a href="{escape(link, quote=True)}">signal gốc</a>. '
+                                 'Nguồn được ghim khi xác nhận, không tự chọn kèo mới hơn.')
+                else:
+                    lines.append(f'Vòng mới từ <a href="{escape(link, quote=True)}">signal gốc</a> · '
+                                 f'{max(0, len(origin.get("message_path", [])) - 1)} bước liên kết')
         if signal_time:
             lines.append(f"Tin gốc: {escape(to_vietnam_datetime(signal_time).strftime('%H:%M:%S %d/%m/%Y'))}")
         can_execute = False

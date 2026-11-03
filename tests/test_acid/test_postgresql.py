@@ -213,6 +213,122 @@ async def test_second_application_is_rejected_and_lost_lease_blocks_sending(pg):
 
 
 @pytest.mark.asyncio
+async def test_notification_claim_has_one_winner_and_fifo(pg):
+    from app.telegram.notifications import NotificationStore
+    store = NotificationStore('test-bot', 42)
+    await store.enqueue('first')
+    await store.enqueue('second')
+    claims = await asyncio.gather(*(store.claim() for _ in range(10)))
+    winners = [c for c in claims if c is not None]
+    assert len(winners) == 1 and winners[0].text == 'first'
+    await store.finish(winners[0], message_id=100)
+    assert (await store.claim()).text == 'second'
+
+
+@pytest.mark.asyncio
+async def test_latest_reentry_source_uses_same_chat_and_prior_telegram_id_not_audit_time(pg):
+    from app.models.signal import Signal
+    from app.telegram.signal_listener import TelegramSignalListener
+    async with database.get_session() as session:
+        source = SignalSource(name='source', chat_id=42)
+        other = SignalSource(name='other', chat_id=43)
+        session.add_all([source, other])
+        await session.flush()
+        # Insert the older message last: DB row ID/received_at must not determine recency.
+        selected = Signal(source_id=source.id, telegram_message_id=200,
+                          raw_message='SELL', message_type='NEW_ORDER', status='EXECUTED')
+        session.add_all([selected,
+            Signal(source_id=source.id, telegram_message_id=400, raw_message='BUY', message_type='NEW_ORDER'),
+            Signal(source_id=other.id, telegram_message_id=250, raw_message='BUY', message_type='NEW_ORDER'),
+            Signal(source_id=source.id, telegram_message_id=299, raw_message='update', message_type='UNKNOWN'),
+            Signal(source_id=source.id, telegram_message_id=100, raw_message='BUY', message_type='NEW_ORDER')])
+        await session.flush()
+        selected_id = selected.id
+    listener = TelegramSignalListener(TradingService(broker=AsyncMock()))
+    assert await listener.latest_reentry_signal(42, 300) == (selected_id, 200)
+
+
+@pytest.mark.asyncio
+async def test_notification_backoff_cannot_be_overtaken_and_expired_lease_recovers(pg):
+    from datetime import timedelta
+    from sqlalchemy import update
+    from app.models.notification import TelegramNotification
+    from app.telegram.notifications import NotificationStore
+    store = NotificationStore('test-bot', 42)
+    await store.enqueue('first')
+    await store.enqueue('second')
+    first = await store.claim()
+    await store.finish(first, error='offline', retry_delay=60)
+    assert await store.claim() is None
+    async with database.get_session() as session:
+        await session.execute(update(TelegramNotification).where(TelegramNotification.id == first.id)
+                              .values(available_at=datetime.now(timezone.utc)-timedelta(seconds=1)))
+    restarted = NotificationStore('test-bot', 42)
+    second_try = await restarted.claim()
+    assert second_try.id == first.id and second_try.attempts == 2
+    # Simulate a crash after claiming, then recover the durable SENDING row.
+    async with database.get_session() as session:
+        await session.execute(update(TelegramNotification).where(TelegramNotification.id == first.id)
+                              .values(available_at=datetime.now(timezone.utc)-timedelta(seconds=1)))
+    third_try = await restarted.claim()
+    assert third_try.attempts == 3 and third_try.token != second_try.token
+    await store.finish(second_try, message_id=101)  # A stale sender cannot overwrite the new owner.
+    async with database.get_session() as session:
+        row = await session.get(TelegramNotification, first.id)
+        assert row.status == 'SENDING' and row.claim_token == third_try.token
+    await restarted.finish(third_try, message_id=102)
+    assert (await restarted.claim()).text == 'second'
+
+
+@pytest.mark.asyncio
+async def test_notifications_are_scoped_to_bot_and_admin_and_failed_rows_do_not_block(pg):
+    from app.telegram.notifications import NotificationStore
+    first, other_bot, other_admin = NotificationStore('bot1', 42), NotificationStore('bot2', 42), NotificationStore('bot1', 43)
+    for store, text in [(other_bot, 'other bot'), (other_admin, 'other admin'), (first, 'bad'), (first, 'good')]:
+        await store.enqueue(text)
+    bad = await first.claim()
+    assert bad.text == 'bad'
+    await first.finish(bad, error='malformed HTML')
+    assert (await first.claim()).text == 'good'
+    assert (await other_bot.claim()).text == 'other bot'
+    assert (await other_admin.claim()).text == 'other admin'
+
+
+@pytest.mark.asyncio
+async def test_notification_enqueue_rollback_does_not_publish_partial_payload(pg, monkeypatch):
+    from app.models.notification import TelegramNotification
+    from app.telegram.notifications import NotificationStore
+    original = database.get_session
+    @asynccontextmanager
+    async def failing_commit():
+        async with original() as session:
+            yield session
+            raise RuntimeError('commit failed')
+    monkeypatch.setattr(database, 'get_session', failing_commit)
+    with pytest.raises(RuntimeError, match='commit failed'):
+        await NotificationStore('bot', 42).enqueue('not committed')
+    async with original() as session:
+        assert await session.scalar(select(func.count()).select_from(TelegramNotification)) == 0
+
+
+@pytest.mark.asyncio
+async def test_notification_cleanup_removes_only_old_sent_rows(pg):
+    from datetime import timedelta
+    from app.models.notification import TelegramNotification
+    from app.telegram.notifications import NotificationStore
+    store = NotificationStore('bot', 42)
+    old = datetime.now(timezone.utc)-timedelta(days=4)
+    async with database.get_session() as session:
+        for status in ['PENDING', 'SENDING', 'SENT', 'FAILED']:
+            session.add(TelegramNotification(bot_key=store.bot_key, chat_id=42, text=status,
+                status=status, created_at=old, sent_at=old if status == 'SENT' else None))
+    await store.cleanup()
+    async with database.get_session() as session:
+        rows = (await session.scalars(select(TelegramNotification))).all()
+        assert {row.status for row in rows} == {'PENDING', 'SENDING', 'FAILED'}
+
+
+@pytest.mark.asyncio
 async def test_schema_migration_preserves_existing_financial_rows(pg):
     from importlib import import_module
     from alembic.migration import MigrationContext
@@ -228,6 +344,14 @@ async def test_schema_migration_preserves_existing_financial_rows(pg):
         def upgrade(connection):
             with Operations.context(MigrationContext.configure(connection)):
                 import_module('migrations.versions.d4e5f6a7b8c9_execution_journal').upgrade()
+                import_module('migrations.versions.e5f6a7b8c9d0_telegram_notifications').upgrade()
         await conn.run_sync(upgrade)
         assert await conn.scalar(text('SELECT profit FROM trades WHERE mt5_ticket = 456')) == D('369.32')
         assert await conn.scalar(text("SELECT to_regclass('broker_commands')")) == 'broker_commands'
+        assert await conn.scalar(text("SELECT to_regclass('telegram_notifications')")) == 'telegram_notifications'
+        await conn.execute(text("INSERT INTO telegram_notifications (bot_key, chat_id, text, status, attempts) VALUES ('test', 42, 'pending', 'PENDING', 0)"))
+        def upgrade_again(connection):
+            with Operations.context(MigrationContext.configure(connection)):
+                import_module('migrations.versions.e5f6a7b8c9d0_telegram_notifications').upgrade()
+        await conn.run_sync(upgrade_again)
+        assert await conn.scalar(text('SELECT count(*) FROM telegram_notifications')) == 1

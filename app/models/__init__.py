@@ -5,6 +5,7 @@ Importing all models here ensures Base.metadata is fully populated.
 
 from app.models.base import Base, TimestampMixin
 from app.models.config import BotConfig, ManagementRule
+from app.models.notification import TelegramNotification
 from app.models.risk import BotEvent, RiskEvent
 from app.models.signal import ParsedSignal, Signal, SignalSource, SignalReceipt
 from app.models.statistics import DailyStatistic
@@ -24,6 +25,7 @@ __all__ = [
     "ManagementAction",
     "BotConfig",
     "ManagementRule",
+    "TelegramNotification",
     "RiskEvent",
     "BotEvent",
     "DailyStatistic",

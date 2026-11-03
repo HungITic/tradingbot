@@ -38,6 +38,7 @@ from app.telegram.keyboards import (
 )
 from app.core.timezone import format_vietnam_time, now_vietnam
 from app.trading.service import TradingService, trading_service
+from app.telegram.notifications import NotificationStore, NotificationWorker
 
 logger = structlog.get_logger(__name__)
 
@@ -88,6 +89,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
         self.app: Application | None = None
         self._running = False
         self._drafts: dict[str, dict] = {}
+        self._notification_worker: NotificationWorker | None = None
 
     async def initialize(self) -> None:
         """Build bot application and register all command & callback handlers."""
@@ -98,6 +100,10 @@ class PersonalTelegramBot(TelegramConsoleMixin):
         self.app = Application.builder().token(settings.telegram.bot_token).build()
 
         # Connect notification dispatch
+        if settings.telegram.admin_chat_id:
+            self._notification_worker = NotificationWorker(
+                NotificationStore(settings.telegram.bot_token, settings.telegram.admin_chat_id),
+                self._deliver_notification)
         self.service.set_notification_callback(self.send_notification)
 
         # Register Commands
@@ -169,6 +175,8 @@ class PersonalTelegramBot(TelegramConsoleMixin):
         if self.app:
             self._running = True
             await self.app.start()
+            if self._notification_worker:
+                self._notification_worker.start()
             if self.app.updater:
                 await self.app.updater.start_polling(drop_pending_updates=False)
             logger.info("personal_telegram_bot_started")
@@ -184,23 +192,30 @@ class PersonalTelegramBot(TelegramConsoleMixin):
                 await self.app.updater.stop()
             if self.app.running:
                 await self.app.stop()
-            await self.app.shutdown()
         except Exception as e:
             logger.warning("personal_telegram_bot_stop_error", error=str(e))
+        finally:
+            # The transport must remain initialized until delivery has drained or timed out.
+            try:
+                if self._notification_worker:
+                    await self._notification_worker.stop()
+            finally:
+                await self.app.shutdown()
         logger.info("personal_telegram_bot_stopped")
 
     async def send_notification(self, text: str, reply_markup=None) -> None:
-        """Push broadcast notification to Admin."""
-        if self.app and settings.telegram.admin_chat_id:
-            try:
-                await self.app.bot.send_message(
-                    chat_id=settings.telegram.admin_chat_id,
-                    text=text,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=reply_markup,
-                )
-            except Exception as e:
-                logger.error("telegram_send_failed", error=str(e))
+        """Commit to the durable queue; never await Telegram from the MT5 action lane."""
+        if self._notification_worker:
+            await self._notification_worker.enqueue(text, reply_markup)
+
+    async def _deliver_notification(self, claim):
+        if not self.app:
+            raise RuntimeError('Telegram transport is not initialized')
+        markup = InlineKeyboardMarkup.de_json(claim.reply_markup, self.app.bot) if claim.reply_markup else None
+        message = await self.app.bot.send_message(chat_id=claim.chat_id, text=claim.text,
+            parse_mode=ParseMode.HTML, reply_markup=markup,
+            connect_timeout=5, read_timeout=10, write_timeout=10, pool_timeout=5)
+        return message.message_id
 
     # -------------------------------------------------------------
     # Command Handlers

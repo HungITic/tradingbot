@@ -273,3 +273,37 @@ async def test_cancel_only_action_records_executed_instead_of_skipped(limits):
     assert svc.set_signal_status.call_args.args[1] == 'EXECUTED'
     svc.broker.open_order.assert_not_awaited()
     svc.broker.close_position.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mode', ['normal', 'paused', 'expired', 'max_positions'])
+async def test_latest_reentry_keeps_new_command_identity_risk_gates_and_origin_audit(limits, mode):
+    from datetime import timedelta
+    from app.models.signal import ParsedSignal
+    svc, session, _, _, _ = limits
+    root = 'BUY XAUUSD 2650\nSL: 2640\nTP1: 2670\nTP2: 2680'
+    origin = {'chat_id': CHAT, 'method': 'latest_signal', 'root_message_id': 100,
+        'selected_message_id': 100, 'selected_signal_id': 10, 'selected_text': root,
+        'message_path': [300, 100], 'root_text': root, 'command_text': 'vòng 2'}
+    now = datetime.now(timezone.utc)
+    if mode == 'paused':
+        svc.risk_config.enabled = False
+    elif mode == 'max_positions':
+        svc.risk_config.max_open_positions = 1
+    await svc.process_raw_message(root+'\n\n[REENTRY COMMAND]: vòng 2', is_reentry=True,
+        chat_id=CHAT, message_id=300, signal_time=now-timedelta(days=1) if mode == 'expired' else now,
+        reentry_origin=origin, related_message_path=origin['message_path'])
+    stored = [call.args[0] for call in session.add.call_args_list]
+    record = next(obj for obj in stored if isinstance(obj, Signal))
+    parsed = next(obj for obj in stored if isinstance(obj, ParsedSignal))
+    assert record.telegram_message_id == 300 and parsed.extra_metadata['reentry_origin'] == origin
+    if mode == 'normal':
+        assert svc.broker.open_order.await_count == 2
+        assert all(c.args[0].sl == D('2639.5') for c in svc.broker.open_order.await_args_list)
+    else:
+        svc.broker.open_order.assert_not_awaited()
+    if mode == 'max_positions':
+        assert next(iter(svc._pending_overrides.values()))['allowed_rule'] == 'max_positions'
+    if mode != 'expired':
+        assert any('Tin vòng mới không có reply' in call.args[0] and 'signal gốc' in call.args[0]
+                   for call in svc.notify.await_args_list)

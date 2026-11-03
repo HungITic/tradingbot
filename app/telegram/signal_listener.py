@@ -30,6 +30,7 @@ class TelegramSignalListener(ReplyChainMixin):
         self.client: TelegramClient | None = None
         self._running = False
         self.last_message_at: datetime | None = None
+        self._ingress_lock = asyncio.Lock()
 
     async def initialize(self) -> None:
         """Create the Telethon client instance."""
@@ -73,6 +74,11 @@ class TelegramSignalListener(ReplyChainMixin):
 
         @self.client.on(events.NewMessage(chats=chats_filter))
         async def on_new_signal_message(event: events.NewMessage.Event) -> None:
+            # Finish recording earlier incoming signals before resolving a no-reply round.
+            async with self._ingress_lock:
+                await process_new_signal_message(event)
+
+        async def process_new_signal_message(event: events.NewMessage.Event) -> None:
             self.last_message_at = event.message.date
             raw_text = event.raw_text
             chat_id = event.chat_id
@@ -185,8 +191,9 @@ class TelegramSignalListener(ReplyChainMixin):
             raise ValueError(f"Tin nhắn #{msg_id} không có nội dung văn bản.")
 
         chat_id = msg.chat_id
-        raw_text, is_reentry, reply_to_msg_id, origin = await self.resolve_reentry(msg)
-        related_path = await self.related_action_path(msg, origin)
+        async with self._ingress_lock:
+            raw_text, is_reentry, reply_to_msg_id, origin = await self.resolve_reentry(msg)
+            related_path = await self.related_action_path(msg, origin)
 
         chat = await msg.get_chat()
         username = getattr(chat, "username", None) if chat else (entity if isinstance(entity, str) else None)

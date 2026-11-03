@@ -152,7 +152,7 @@ class TradingService(SlippageLimitMixin, ManagementScopeMixin, NativeTPMixin, Cl
         self._notify_callback = callback
 
     async def notify(self, message: str, reply_markup=None) -> None:
-        """Push a message to admin Telegram."""
+        """Record a notification via the callback (production enqueues, never sends here)."""
         if self._notify_callback:
             try:
                 import inspect
@@ -866,6 +866,15 @@ class TradingService(SlippageLimitMixin, ManagementScopeMixin, NativeTPMixin, Cl
             await self.set_signal_status(signal_db_id, "REJECTED", problem)
             await self.notify(self.format_notification(f"⛔ <b>Signal Rejected</b>\n{escape(problem)}", message_link))
             return
+        if is_reentry and reentry_origin and reentry_origin.get('method') == 'latest_signal':
+            from app.telegram.utils import construct_telegram_message_link
+            root_link = construct_telegram_message_link(chat_id, reentry_origin.get('root_message_id'))
+            selected_link = construct_telegram_message_link(chat_id, reentry_origin.get('selected_message_id'))
+            await self.notify(self.format_notification(
+                '🔁 Tin vòng mới không có reply: dùng '
+                f'<a href="{escape(selected_link, quote=True)}">signal gần nhất</a> trong cùng nhóm · '
+                f'<a href="{escape(root_link, quote=True)}">signal gốc</a>. '
+                'Tiếp tục kiểm tra điều kiện vào lệnh.', message_link))
         cancelled_limits = await self.invalidate_slippage_limits(signal, chat_id, message_id, reply_to_msg_id,
             related_message_path or (reentry_origin or {}).get('message_path'), management_scope, is_reentry)
         context = await self.build_risk_context()

@@ -488,6 +488,41 @@ async def test_rule_repeat_permission_is_visible_in_preview(svc):
 
 
 @pytest.mark.asyncio
+async def test_partial_and_auto_be_complete_while_telegram_sender_is_blocked(svc):
+    import asyncio
+    from app.telegram.notifications import NotificationClaim, NotificationWorker
+    from app.telegram.personal_bot import PersonalTelegramBot
+    entered, release = asyncio.Event(), asyncio.Event()
+    queue = [NotificationClaim(1, 42, 'previous notice', None, 'token', 1)]
+    store = SimpleNamespace(enqueue=AsyncMock(), cleanup=AsyncMock(), finish=AsyncMock(),
+                            claim=AsyncMock(side_effect=lambda: queue.pop() if queue else None))
+    async def blocked_send(item):
+        entered.set()
+        await release.wait()
+        return 100
+    worker = NotificationWorker(store, blocked_send)
+    bot = PersonalTelegramBot(svc)
+    bot._notification_worker = worker
+    svc.notify = TradingService.notify.__get__(svc)
+    svc.set_notification_callback(bot.send_notification)
+    svc.broker.get_positions.return_value = [position(sl='2640')]
+    worker.start()
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        async def action():
+            async with svc._execution_lock:
+                await svc.process_management_signal(SignalParser().parse('XAUUSD chốt bớt'), 20, None, None)
+        await asyncio.wait_for(action(), 1)
+        svc.broker.close_position.assert_awaited_once_with(1, D('.05'))
+        svc.broker.modify_position.assert_awaited_once_with(1, sl=D('2650.000'))
+        assert store.enqueue.await_count == 2 and not release.is_set()
+        assert not svc._execution_lock.locked()
+    finally:
+        release.set()
+        await worker.stop()
+
+
+@pytest.mark.asyncio
 async def test_unknown_allowlisted_phrase_cannot_create_a_trading_action(svc):
     svc.risk_config.repeat_partial_close_keywords = ['kèo chạy rồi ae']
     preview = await svc.preview_signal('kèo chạy rồi AE')
