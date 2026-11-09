@@ -153,6 +153,7 @@ class ManagementRuleEngine:
                 # Build action
                 pct = explicit_pct if explicit_pct is not None else rule.default_params.get("percentage")
                 target = rule.default_params.get("target")
+                inferred_bad_entry = False
                 if (rule.action_type == ManagementType.PARTIAL_CLOSE
                         and target is None
                         and (re.search(r"\bchốt\s+bớt\b", rule.keyword)
@@ -160,6 +161,7 @@ class ManagementRuleEngine:
                         and re.search(r"\bchốt\s+bớt\b", lower_text)
                         and re.search(r"\bxấu\b", lower_text)):
                     target = "MIN_ENTRY"
+                    inferred_bad_entry = not bool(re.search(r"\bxấu\b", rule.keyword))
 
                 price = None
                 if rule.action_type == ManagementType.MOVE_SL:
@@ -180,7 +182,7 @@ class ManagementRuleEngine:
                     action_type=rule.action_type,
                     percentage=pct,
                     percentage_source=("message" if explicit_pct is not None else
-                        "rule_explicit" if pct is not None and rule.default_params.get('percentage_explicit') else
+                        "rule_explicit" if pct is not None and rule.default_params.get('percentage_explicit') and not inferred_bad_entry else
                         "rule" if pct is not None else "default"),
                     target=target,
                     keyword=rule.keyword,
@@ -194,11 +196,21 @@ class ManagementRuleEngine:
         unique = {}
         for action in actions:
             kind = "STOP" if action.action_type in {ManagementType.MOVE_SL, ManagementType.BREAKEVEN} else action.action_type.value
-            key = (kind, action.price, action.side, action.percentage, action.target)
+            is_bad_entry = action.action_type == ManagementType.PARTIAL_CLOSE and action.target == "MIN_ENTRY"
+            key = (kind, "MIN_ENTRY") if is_bad_entry else (kind, action.price, action.side, action.percentage, action.target)
             previous = unique.get(key)
             first_offset = min(action_offsets[id(action)], action_offsets[id(previous)]) if previous is not None else action_offsets[id(action)]
-            # Equivalent triggers must not close twice; an explicit denial wins conflicts.
-            if previous is None or (previous.allow_repeat is None and action.allow_repeat is not None) or action.allow_repeat is False:
+            # Equivalent triggers must not close twice; an explicit denial or specific bad-entry rule wins conflicts.
+            if previous is None:
+                unique[key] = action
+            elif is_bad_entry:
+                prev_specific = bool(re.search(r"\bxấu\b", previous.keyword or ""))
+                curr_specific = bool(re.search(r"\bxấu\b", action.keyword or ""))
+                if curr_specific and not prev_specific:
+                    unique[key] = action
+                elif prev_specific == curr_specific and ((previous.allow_repeat is None and action.allow_repeat is not None) or action.allow_repeat is False):
+                    unique[key] = action
+            elif (previous.allow_repeat is None and action.allow_repeat is not None) or action.allow_repeat is False:
                 unique[key] = action
             action_offsets[id(unique[key])] = first_offset
         # Keyword length/priority resolves overlapping matches; independent rules

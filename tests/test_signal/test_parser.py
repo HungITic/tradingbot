@@ -237,6 +237,28 @@ class TestManagementRules:
         assert actions[0].percentage == Decimal('70') and actions[0].target is None
         assert actions[0].allow_repeat is False and actions[1].target == 'MIN_ENTRY'
 
+    def test_inferred_bad_entry_ignores_generic_chot_bot_explicit_flag_and_deduplicates_entry_xau(self):
+        engine = ManagementRuleEngine()
+        engine.add_or_update_rule('kèo chạy', ManagementType.PARTIAL_CLOSE,
+            {'percentage': Decimal('70'), 'percentage_explicit': True})
+        engine.add_or_update_rule('chốt bớt', ManagementType.PARTIAL_CLOSE,
+            {'percentage': Decimal('70'), 'percentage_explicit': True})
+        text = '#XAU Cậu khớp full entry kèo chạy rồi nhé +110 pips\nAnh em chủ động chốt bớt entry xấu dịch stoploss gồng TP nhé✅'
+        actions = SignalParser(rule_engine=engine).parse(text).management_actions
+        assert [(a.keyword, a.target, a.percentage_source) for a in actions] == [
+            ('kèo chạy', None, 'rule_explicit'),
+            ('chốt bớt', 'MIN_ENTRY', 'rule'),
+            ('dịch stoploss', 'ENTRY', 'default'),
+        ]
+        engine.add_or_update_rule('entry xấu', ManagementType.PARTIAL_CLOSE,
+            {'percentage': Decimal('100'), 'percentage_explicit': True})
+        actions_with_specific = SignalParser(rule_engine=engine).parse(text).management_actions
+        assert [(a.keyword, a.target, a.percentage, a.percentage_source) for a in actions_with_specific] == [
+            ('kèo chạy', None, Decimal('70'), 'rule_explicit'),
+            ('entry xấu', 'MIN_ENTRY', Decimal('100'), 'rule_explicit'),
+            ('dịch stoploss', 'ENTRY', None, 'default'),
+        ]
+
     def test_parse_combo_management_message(self, parser):
         text = "#XAU Kèo chạy rồi ae +120pips chốt bớt dịch stoploss nha"
         signal = parser.parse(text)

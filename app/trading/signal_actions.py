@@ -11,6 +11,7 @@ from app.models.risk import RiskEvent
 from app.models.signal import Signal, SignalSource
 from app.models.trade import Order, Position
 from app.telegram.utils import construct_telegram_message_link
+from app.trading.native_tp import comment_matches
 
 
 class SignalActionsMixin:
@@ -66,7 +67,7 @@ class SignalActionsMixin:
             order = next(iter(candidates.values()))
             if order.symbol != item.symbol:
                 continue
-            if order.comment and item.comment and order.comment != item.comment:
+            if order.comment and item.comment and not comment_matches(item.comment, order.comment):
                 continue
             side = item.position_type if is_position else item.order_type.split('_')[0]
             if order.mt5_order_type is not None and side != ('BUY' if order.mt5_order_type % 2 == 0 else 'SELL'):

@@ -437,6 +437,11 @@ class MT5Executor(BrokerAdapter):
         )
         close_price = float(tick.bid if close_type == ORDER_TYPE_SELL else tick.ask)
 
+        close_comment = (
+            target_pos.comment
+            if (close_volume < target_pos.volume and target_pos.comment and not target_pos.comment.startswith("trading-bot-close-"))
+            else f"trading-bot-close-{ticket}"
+        )
         req_dict: dict[str, Any] = {
             "action": TRADE_ACTION_DEAL,
             "position": ticket,
@@ -446,7 +451,7 @@ class MT5Executor(BrokerAdapter):
             "price": close_price,
             "deviation": 20,
             "magic": target_pos.magic or 234000,
-            "comment": f"trading-bot-close-{ticket}",
+            "comment": close_comment,
             "type_time": ORDER_TIME_GTC,
             "type_filling": ORDER_FILLING_IOC,
         }

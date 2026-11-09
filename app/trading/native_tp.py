@@ -18,6 +18,12 @@ def branch_comment(comment):
     return comment[:-4] if comment.endswith(SUFFIXES) else comment
 
 
+def comment_matches(live_comment, stored_comment):
+    if not live_comment or not stored_comment or live_comment == stored_comment:
+        return True
+    return live_comment.startswith('trading-bot-close-')
+
+
 def native_comment(comment):
     return bool(comment and comment.endswith(SUFFIXES) and branch_comment(comment) in BRANCHES)
 
@@ -122,8 +128,10 @@ class NativeTPMixin:
             order = orders.get(pos.ticket)
             key = native_key(order)
             # DB and live broker labels must agree when broker retains a label.
-            if key and pos.comment and pos.comment != order.comment:
+            if key and not comment_matches(pos.comment, order.comment):
                 key = None
+            elif order and order.comment and pos.comment and pos.comment.startswith('trading-bot-close-'):
+                pos = replace(pos, comment=order.comment)
             groups[(key, pos.position_type) if key else ('ticket', pos.ticket)].append(pos)
         result = []
         for children in groups.values():

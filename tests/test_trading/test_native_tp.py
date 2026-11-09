@@ -64,6 +64,8 @@ def native(monkeypatch):
         target.volume -= volume
         if target.volume == 0:
             live.remove(target)
+        else:
+            target.comment = f'trading-bot-close-{ticket}'
         return OrderResult(True, ticket=ticket, retcode=10009, volume=volume)
     broker.close_position.side_effect = close
     broker.modify_position.return_value = OrderResult(True, price=D('2650'))
@@ -569,3 +571,30 @@ async def test_close_tp1_does_not_cancel_unrelated_tp2_pending(native):
     svc.broker.close_position.assert_awaited_once_with(1, D('.45'))
     svc.broker.cancel_order.assert_not_awaited()
     assert len(live) == 1 and live[0].ticket == 2
+
+
+@pytest.mark.asyncio
+async def test_combo_keo_chay_70_then_bad_entry_100_and_move_sl_survives_close_comment(native):
+    svc, rows, live = native
+    rows += [order(1, '.6'), order(2, '1.4', 'tp2'),
+             order(3, '.6', branch='bot-max-entry'), order(4, '1.4', 'tp2', branch='bot-max-entry')]
+    live += [position(1, '.6'), position(2, '1.4', 'tp2'),
+             replace(position(3, '.6'), comment='bot-max-entry:tp1'),
+             replace(position(4, '1.4', 'tp2'), comment='bot-max-entry:tp2')]
+    svc.broker.get_positions.side_effect = lambda: [replace(p) for p in live]
+    svc.risk_config.bad_entry_partial_close_percent = D('100')
+    svc.parser.rule_engine.add_or_update_rule('kèo chạy', ManagementType.PARTIAL_CLOSE,
+        {'percentage': D('70'), 'percentage_explicit': True})
+    svc.parser.rule_engine.add_or_update_rule('chốt bớt', ManagementType.PARTIAL_CLOSE,
+        {'percentage': D('70'), 'percentage_explicit': True})
+    text = (
+        '#XAU Cậu khớp full entry kèo chạy rồi nhé +110 pips\n'
+        'Anh em chủ động chốt bớt entry xấu dịch stoploss gồng TP nhé✅'
+    )
+    await svc.process_management_signal(svc.parser.parse(text), 30, None, None)
+    # Min Entry (#1, #2) must be 100% closed; Max Entry (#4) keeps 30% (0.6 lot) with SL moved to entry.
+    assert [(p.ticket, p.volume) for p in live] == [(4, D('.6'))]
+    assert [c.args for c in svc.broker.close_position.await_args_list] == [
+        (1, D('.6')), (2, D('.8')), (3, D('.6')), (4, D('.8')), (2, D('.6'))]
+    svc.broker.modify_position.assert_awaited_once_with(4, sl=D('2650.00'))
+    svc.set_signal_status.assert_awaited_once_with(30, 'EXECUTED')

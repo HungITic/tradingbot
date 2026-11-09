@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from dataclasses import replace
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 from html import escape
 
@@ -13,7 +14,7 @@ from app.broker.base import OrderResult, PositionInfo
 from app.config import database
 from app.models.trade import ManagementAction, Order, Position
 from app.signal.models import ManagementType
-from app.trading.native_tp import branch_comment, native_comment, native_key
+from app.trading.native_tp import branch_comment, comment_matches, native_comment, native_key
 
 logger = structlog.get_logger(__name__)
 
@@ -438,7 +439,7 @@ class PositionPolicyMixin:
             selected = [child for parent in selected for child in (parent.members or (parent,))
                         if native_key(orders.get(child.ticket))
                         and orders[child.ticket].comment.endswith(suffix)
-                        and (not child.comment or child.comment == orders[child.ticket].comment)]
+                        and comment_matches(child.comment, orders[child.ticket].comment)]
             if not selected:
                 raise ValueError(f'Không có phần {action.target} đang mở với nhãn TP đã lưu; chưa tác động phần TP khác.')
             return selected
@@ -460,10 +461,16 @@ class PositionPolicyMixin:
 
     async def fresh_management_positions(self, original_positions):
         originals = {child.ticket: child for p in original_positions for child in (p.members or (p,))}
-        live = [p for p in await self.broker.get_positions() if p.ticket in originals
-                and p.symbol == originals[p.ticket].symbol
-                and p.position_type == originals[p.ticket].position_type
-                and (not p.comment or not originals[p.ticket].comment or p.comment == originals[p.ticket].comment)]
+        live = [
+            replace(p, comment=originals[p.ticket].comment)
+            if p.comment and p.comment.startswith('trading-bot-close-') and originals[p.ticket].comment
+            else p
+            for p in await self.broker.get_positions()
+            if p.ticket in originals
+            and p.symbol == originals[p.ticket].symbol
+            and p.position_type == originals[p.ticket].position_type
+            and comment_matches(p.comment, originals[p.ticket].comment)
+        ]
         # Rebuild current branch volumes from the surviving, originally selected
         # children; a newly filled pending entry cannot widen a management scope.
         return await self.group_native_positions(live)
@@ -578,7 +585,7 @@ class PositionPolicyMixin:
                 allowed = {p.ticket for p in original_selection}
                 selected = [child for p in fresh for child in (p.members or (p,))]
                 selected = [p for p in selected if p.ticket in allowed
-                            and (not p.comment or p.comment == orders[p.ticket].comment)]
+                            and comment_matches(p.comment, orders[p.ticket].comment)]
             else:
                 allowed = {self.management_position_key(p, orders) for p in original_selection}
                 selected = [p for p in fresh if self.management_position_key(p, orders) in allowed]
