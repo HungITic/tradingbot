@@ -31,7 +31,7 @@ Các lệnh đặt thủ công bên ngoài bot không nằm trong bộ đếm n�
 
 Khi chạm ngưỡng, bot thông báo lý do, thời gian cần đợi và từ chối signal. Không
 tự xếp hàng để thực thi muộn. Chốt/hủy/dời SL của vị thế hiện tại không bị chặn.
-Signal ngược chiều bị chặn bởi giới hạn này sẽ không chạy bước chốt nửa vị thế
+Signal ngược chiều bị chặn bởi giới hạn này sẽ không chạy bước đóng vị thế
 ngược chiều để mở kèo mới. Các cập nhật quản lý/hủy limit liên quan vẫn theo
 chính sách riêng hiện có.
 

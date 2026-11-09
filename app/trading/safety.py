@@ -189,14 +189,16 @@ class TradingSafetyMixin:
                     field("Tổng khối lượng", f"{number(sum(volumes))} lot")), ""]
             if not problem:
                 context = await self.build_risk_context()
-                from app.trading.position_policy import PartialVolumeTooSmall
+                from app.trading.position_policy import OPPOSITE_SIGNAL_CLOSE_PERCENT, PartialVolumeTooSmall
+                pct = OPPOSITE_SIGNAL_CLOSE_PERCENT
+                pct_text = f'{pct.normalize():f}'
                 for pos in await self.opposite_signal_positions(order):
                     try:
-                        amount = await self.partial_volume(pos, Decimal('50'))
-                        lines.append(f'Signal ngược chiều: chốt 50% {pos.symbol} {pos.position_type} '
+                        amount = await self.partial_volume(pos, pct)
+                        lines.append(f'Signal ngược chiều: chốt {pct_text}% {pos.symbol} {pos.position_type} '
                                      f'còn lại ({number(pos.volume)} → đóng {number(amount)} lot).')
                     except PartialVolumeTooSmall:
-                        lines.append(f'{pos.symbol} {pos.position_type}: lot còn lại quá nhỏ để chốt 50%; giữ nguyên.')
+                        lines.append(f'{pos.symbol} {pos.position_type}: lot còn lại quá nhỏ để chốt {pct_text}%; giữ nguyên.')
                 context.planned_order_count = len(volumes) * self.native_leg_count(order.take_profit, order.take_profit_2)
                 decision = self.risk_engine.evaluate(signal, context)
                 if not decision.approved:

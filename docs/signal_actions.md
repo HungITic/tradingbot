@@ -46,7 +46,7 @@ Mỗi kèo đã liên kết signal trong **Kèo đang chạy** có nút
   theo "signal gần nhất" hay "tất cả". Nếu tin chỉ nhắm vào kèo đã ngừng, signal
   được ghi `SKIPPED`; nếu tin áp dụng cho nhiều kèo, các kèo khác vẫn được xử lý.
 - Limit do trượt giá của kèo không bị hủy bởi action cập nhật.
-- Signal mở lệnh ngược chiều không chốt 50% vị thế của kèo này (bản xem trước
+- Signal mở lệnh ngược chiều không đóng 100% vị thế của kèo này (bản xem trước
   khi duyệt thủ công cũng không liệt kê kèo này).
 - Vẫn giữ: SL/TP trên broker, TP1/TP2 tự động, tự hủy Max Entry khi Min Entry
   đã chốt, và mọi thao tác thủ công qua bot (Đóng kèo, Hủy chờ, từng ticket).

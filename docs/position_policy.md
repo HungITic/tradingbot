@@ -77,9 +77,9 @@ Bản này thay thế các mô tả cũ về TP1, hòa vốn và chốt một ph
 
 ## Signal vào lệnh ngược chiều
 
-- Signal NEW_ORDER hợp lệ (kể cả vòng mới và replay đã xác nhận) cùng symbol, ngược BUY/SELL với vị thế bot đang mở: chốt 50% khối lượng **còn lại** của mỗi nhánh entry, rồi kiểm tra vào lệnh mới như cũ. Áp dụng cho mọi kèo bot phù hợp; không đóng vị thế cùng chiều, khác symbol hoặc không có order gắn signal trong DB.
-- Tỷ lệ cố định 50%, độc lập với tỷ lệ chốt chung/entry xấu và `allow_multiple_partial_closes`. Mỗi signal mới có thể chốt tiếp, ví dụ 1.50 → 0.75 → 0.38 lot khi bước lot 0.01 (lần hai đóng 0.37).
-- Nhánh TP1/TP2 được cộng lot trước khi tính 50%, làm tròn xuống theo bước lot, giảm TP1 trước. Không đủ lot tối thiểu thì bỏ qua, không tự đóng hết. Việc chốt vẫn áp dụng hủy Max Entry còn chờ theo chính sách hiện có.
+- Signal NEW_ORDER hợp lệ (kể cả vòng mới và replay đã xác nhận) cùng symbol, ngược BUY/SELL với vị thế bot đang mở: đóng 100% khối lượng **còn lại** của mỗi nhánh entry (trừ kèo đang ngừng nhận action), rồi kiểm tra vào lệnh mới như cũ. Áp dụng cho mọi kèo bot phù hợp; không đóng vị thế cùng chiều, khác symbol hoặc không có order gắn signal trong DB.
+- Tỷ lệ cố định 100%, độc lập với tỷ lệ chốt chung/entry xấu và `allow_multiple_partial_closes`.
+- Nhánh TP1/TP2 được đóng toàn bộ các phần còn mở (TP1 trước, TP2 sau). Việc đóng vẫn áp dụng hủy Max Entry còn chờ theo chính sách hiện có.
 - Chỉ thực hiện khi bot bật, broker kết nối, signal/giá và cấu hình mở nhánh hợp lệ. Giảm vị thế diễn ra trước kiểm tra rủi ro mở mới: dù lệnh mới sau đó phải chờ duyệt hoặc bị từ chối, phần đã chốt không bị hoàn tác. Duyệt lệnh sau đó không chốt thêm lần nữa. Preview chỉ hiển thị dự kiến, không gửi MT5.
 - Lưu ý định vào risk audit trước khi chốt và lưu từng kết quả quản lý theo signal mới; receipt/replay không cho cùng tin chốt thêm lần nữa. Chốt lỗi, khớp thiếu hoặc chưa rõ kết quả thì dừng mở mới và không tự gửi lại. Không cần migration SQL.
 

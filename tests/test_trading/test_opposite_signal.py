@@ -90,73 +90,70 @@ def entry(side='SELL'):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('new_side,old_side', [('SELL', 'BUY'), ('BUY', 'SELL')])
-async def test_only_opposite_managed_exact_symbol_is_halved(opposite, new_side, old_side):
+async def test_only_opposite_managed_exact_symbol_is_closed_in_full(opposite, new_side, old_side):
     svc, live, rows, events, _, _ = opposite
     live.extend([position(side=old_side), position(2, side=new_side),
                  position(3, side=old_side, symbol='EURUSD'), position(4, side=old_side),
                  position(5, side=old_side)])
     rows.extend([opening(live[0]), opening(live[1]), opening(live[2]), opening(live[4], None)])
     assert await svc.close_opposite_signal_half(entry(new_side), 20)
-    svc.broker.close_position.assert_awaited_once_with(1, D('.75'))
+    svc.broker.close_position.assert_awaited_once_with(1, D('1.5'))
     intent = events.index('intent')
     assert intent < events.index('commit', intent) < events.index('close')
     svc.cancel_dual_entry_pending_orders_on_close.assert_awaited_once()
     audit = svc._insert_management_action.call_args.args
-    assert audit[0] == 20 and audit[3]['reason'] == 'OPPOSITE_SIGNAL_HALF'
-    assert audit[5]['close_cause'] == 'OPPOSITE_SIGNAL_HALF'
+    assert audit[0] == 20 and audit[2] == 'CLOSE'
+    assert audit[3]['reason'] == 'OPPOSITE_SIGNAL_HALF' and audit[3]['percentage'] == '100'
+    assert audit[5]['close_cause'] == 'OPPOSITE_SIGNAL_HALF' and audit[5]['partial_close'] is False
 
 
 @pytest.mark.asyncio
-async def test_muted_setup_is_not_halved_by_opposite_signal(opposite):
+async def test_muted_setup_is_not_closed_by_opposite_signal(opposite):
     svc, live, rows, events, _, _ = opposite
     live.extend([position(1), position(2)])
     rows.extend([opening(live[0], 10), opening(live[1], 11)])
     svc._muted_signal_ids = {10}
     assert [p.ticket for p in await svc.opposite_signal_positions(entry())] == [2]
     assert await svc.close_opposite_signal_half(entry(), 20)
-    svc.broker.close_position.assert_awaited_once_with(2, D('.75'))
+    svc.broker.close_position.assert_awaited_once_with(2, D('1.5'))
     svc._muted_signal_ids = {10, 11}
     svc.broker.close_position.reset_mock()
     assert await svc.close_opposite_signal_half(entry(), 21) is None
     svc.broker.close_position.assert_not_awaited()
 
+
 @pytest.mark.asyncio
-async def test_repeat_halves_remaining_even_when_repeat_and_percent_settings_differ(opposite):
+async def test_closes_remaining_in_full_even_when_repeat_and_percent_settings_differ(opposite):
     svc, live, rows, _, _, _ = opposite
     svc.risk_config.allow_multiple_partial_closes = False
     svc.risk_config.default_partial_close_percent = D('30')
-    svc.risk_config.bad_entry_partial_close_percent = D('100')
+    svc.risk_config.bad_entry_partial_close_percent = D('25')
     live.append(replace(position(volume='.75'), initial_volume=D('1.5')))
     rows.append(opening(position()))
     await svc.close_opposite_signal_half(entry(), 20)
-    assert live[0].volume == D('.38')
-    await svc.close_opposite_signal_half(entry(), 21)
-    assert live[0].volume == D('.19')
-    assert [call.args[1] for call in svc.broker.close_position.await_args_list] == [D('.37'), D('.19')]
+    assert live == []
+    svc.broker.close_position.assert_awaited_once_with(1, D('.75'))
 
 
 @pytest.mark.asyncio
-async def test_native_tp_legs_use_total_branch_volume_and_tp1_first(opposite):
+async def test_native_tp_legs_close_all_remaining_legs_tp1_first(opposite):
     svc, live, rows, _, _, _ = opposite
     live.extend([position(1, '.45', comment='bot-min-entry:tp1'),
                  position(2, '1.05', comment='bot-min-entry:tp2')])
     rows.extend(opening(p) for p in live)
     await svc.close_opposite_signal_half(entry(), 20)
-    assert [call.args for call in svc.broker.close_position.await_args_list] == [(1, D('.45')), (2, D('.30'))]
-    assert sum(p.volume for p in live) == D('.75')
-    await svc.close_opposite_signal_half(entry(), 21)
-    assert svc.broker.close_position.await_args.args == (2, D('.37'))
-    assert live[0].volume == D('.38')
+    assert [call.args for call in svc.broker.close_position.await_args_list] == [(1, D('.45')), (2, D('1.05'))]
+    assert live == []
 
 
 @pytest.mark.asyncio
-async def test_minimum_lot_is_kept_instead_of_closed_in_full(opposite):
+async def test_minimum_lot_is_closed_in_full(opposite):
     svc, live, rows, _, _, _ = opposite
     live.append(position(volume='.01'))
     rows.append(opening(live[0]))
     assert await svc.close_opposite_signal_half(entry(), 20)
-    svc.broker.close_position.assert_not_awaited()
-    assert svc._insert_management_action.call_args.args[4] == 'SKIPPED'
+    svc.broker.close_position.assert_awaited_once_with(1, D('.01'))
+    assert live == []
 
 
 @pytest.mark.asyncio
@@ -200,19 +197,21 @@ async def test_pipeline_closes_before_entry_and_duplicate_does_not_close_twice(o
     await svc.process_raw_message(raw, chat_id=-1001, message_id=300)
     assert events.index('close') < events.index('open')
     await svc.process_raw_message(raw, chat_id=-1001, message_id=300)
-    svc.broker.close_position.assert_awaited_once_with(1, D('.75'))
+    svc.broker.close_position.assert_awaited_once_with(1, D('1.5'))
 
 
 @pytest.mark.asyncio
-async def test_approval_after_reduction_only_opens_and_never_halves_again(opposite):
+async def test_approval_after_reduction_only_opens_and_never_closes_again(opposite):
     svc, live, rows, _, _, _ = opposite
     svc.risk_config.max_open_positions = 1
-    live.append(position())
-    rows.append(opening(live[0]))
+    live.extend([position(), position(2, symbol='EURUSD')])
+    rows.extend([opening(live[0]), opening(live[1])])
     await svc.process_raw_message('SELL XAUUSD 2650\nSL: 2660\nTP: 2630')
-    svc.broker.close_position.assert_awaited_once_with(1, D('.75'))
+    svc.broker.close_position.assert_awaited_once_with(1, D('1.5'))
     svc.broker.open_order.assert_not_awaited()
     assert svc._pending_overrides[20]['allowed_rule'] == 'max_positions'
+    live.append(position(3))
+    rows.append(opening(live[-1], 12))
     result = await svc.execute_override_order(20, 'min')
     assert '✅' in result
     assert svc.broker.open_order.await_count == 1
@@ -234,14 +233,14 @@ async def test_pipeline_aborts_entry_when_reduction_fails(opposite):
 
 
 @pytest.mark.asyncio
-async def test_native_rounding_is_once_per_branch(opposite):
+async def test_small_native_tp_legs_are_both_closed_in_full(opposite):
     svc, live, rows, _, _, _ = opposite
     live.extend([position(1, '.03', comment='bot-min-entry:tp1'),
                  position(2, '.03', comment='bot-min-entry:tp2')])
     rows.extend(opening(p) for p in live)
     await svc.close_opposite_signal_half(entry(), 20)
-    svc.broker.close_position.assert_awaited_once_with(1, D('.03'))
-    assert sum(p.volume for p in live) == D('.03')
+    assert [call.args for call in svc.broker.close_position.await_args_list] == [(1, D('.03')), (2, D('.03'))]
+    assert live == []
 
 
 @pytest.mark.asyncio
@@ -267,13 +266,13 @@ async def test_pipeline_does_not_close_when_inactive_or_invalid(opposite, mode):
 
 
 @pytest.mark.asyncio
-async def test_replay_preview_displays_half_without_mutations(opposite):
+async def test_replay_preview_displays_full_close_without_mutations(opposite):
     svc, live, rows, events, session, _ = opposite
     live.append(position(volume='.75'))
     rows.append(opening(live[0]))
     preview = await svc.preview_signal('SELL XAUUSD 2650\nSL: 2660\nTP: 2630', skip_signal_expiry_check=True)
     assert preview['can_execute']
-    assert 'Signal ngược chiều' in preview['text'] and '0.37' in preview['text']
+    assert 'Signal ngược chiều' in preview['text'] and '100%' in preview['text'] and '0.75' in preview['text']
     svc.broker.close_position.assert_not_awaited()
     svc.broker.open_order.assert_not_awaited()
     session.add.assert_not_called()

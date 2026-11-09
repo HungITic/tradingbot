@@ -210,7 +210,8 @@ class PositionPolicyMixin:
             return OrderResult(False, ticket=pos.ticket, comment="Bỏ qua chốt vì tỷ lệ là 0%", raw={"skipped": True}), volume
         result = await self.broker.close_position(pos.ticket, volume)
         if result.success:
-            await self.cancel_dual_entry_pending_orders_on_close(pos.ticket, reason="Min Entry đã chốt một phần")
+            reason = "Min Entry đã đóng" if volume == pos.volume else "Min Entry đã chốt một phần"
+            await self.cancel_dual_entry_pending_orders_on_close(pos.ticket, reason=reason)
         return result, volume
 
     async def opposite_signal_positions(self, order):
