@@ -260,6 +260,9 @@ def test_settings_menu_exposes_every_editable_runtime_field_once():
     ('max_lot', '0.1', D('.1')),
     ('allowed_symbols', 'XAUUSD.sc, EURUSD', ['XAUUSD.SC', 'EURUSD']),
     ('duplicate_timeout_seconds', '20', 20),
+    ('entry_cooldown_seconds', '60', 60),
+    ('max_entries_per_window', '3', 3),
+    ('entry_window_seconds', '300', 300),
     ('broker_utc_offset_hours', '2', 2),
     ('bad_entry_partial_close_percent', '35', D('35')),
     ('bad_entry_partial_close_percent', '100', D('100')),
@@ -464,6 +467,27 @@ async def test_setups_buttons_use_persistent_signal_ids_and_hide_unlinked_action
     assert not any('None' in d or 'sigexit_all_3' == d for d in data)
     assert 'Xem signal gốc' in text
 
+
+@pytest.mark.asyncio
+async def test_setups_mute_button_toggles_and_shows_state(bot):
+    muted = {'value': False}
+    async def cards():
+        return [{'signal_id': 10, 'name': 'Kèo #10', 'positions': [position(1)], 'orders': [],
+                 'actions_muted': muted['value']}]
+    bot.service.get_setup_cards = cards
+    async def set_muted(signal_id, value, updated_by):
+        muted['value'] = value
+    bot.service.set_signal_actions_muted = AsyncMock(side_effect=set_muted)
+    _, keyboard = await bot.setups_view()
+    data = [b.callback_data for row in keyboard.inline_keyboard for b in row]
+    assert 'sigmute_1_10_0' in data
+    update, context = callback()
+    await bot.handle_console_callback(update, context, 'sigmute_1_10_0')
+    bot.service.set_signal_actions_muted.assert_awaited_once_with(10, True, updated_by='TELEGRAM')
+    text = update.callback_query.edit_message_text.call_args.args[0]
+    keyboard = update.callback_query.edit_message_text.call_args.kwargs['reply_markup']
+    assert 'Đang ngừng nhận action' in text
+    assert 'sigmute_0_10_0' in [b.callback_data for row in keyboard.inline_keyboard for b in row]
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('confirm', [False, True])

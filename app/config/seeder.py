@@ -58,6 +58,12 @@ INITIAL_BOT_CONFIGS: list[dict[str, Any]] = [
     },
     {
         "category": "risk",
+        "key": "entry_throttle",
+        "value": {"entry_cooldown_seconds": 0, "max_entries_per_window": 0, "entry_window_seconds": 300},
+        "description": "Account-wide cooldown and rolling window for opening new signals",
+    },
+    {
+        "category": "risk",
         "key": "position_management",
         "value": {
             "default_partial_close_percent": 50.0,
@@ -103,7 +109,7 @@ async def seed_initial_data(session: AsyncSession | None = None) -> dict[str, in
     Seed initial configuration and all management rules into PostgreSQL.
 
     Ensures:
-    1. All 5 configuration sections exist in `bot_config` table.
+    1. All configured sections exist in `bot_config` table.
        Missing keys in existing entries are merged cleanly.
     2. All 38 Vietnamese management rules from `DEFAULT_RULES` exist
        and are enabled in `management_rules` table.

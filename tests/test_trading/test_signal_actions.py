@@ -125,6 +125,34 @@ async def test_pending_only_does_not_close_existing_or_newly_filled_positions(sc
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('mode', ['pending', 'all'])
+async def test_journal_already_cancelled_row_does_not_stop_after_first_pending(scenario, mode):
+    """Regression: the MT5 journal marks the row CANCELLED itself, so the later
+    status update hits zero rows. That must not stop after cancelling half."""
+    s = scenario
+    args = await preview(s, mode)
+    s.svc._update_db_order_status = AsyncMock(return_value=False)
+    s.session.scalar = AsyncMock(return_value='CANCELLED')
+    message = await s.svc.execute_signal_exit(**args)
+    cancels = [e for e in s.events if isinstance(e, tuple) and e[0] == 'cancel']
+    assert cancels == [('cancel', 103), ('cancel', 104)]
+    assert [p.ticket for p in s.pending] == [204]
+    assert 'hủy 2' in message and 'Đã dừng' not in message
+    if mode == 'all':
+        assert [p.ticket for p in s.positions] == [21, 31]
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_db_cancel_still_stops_and_reports(scenario):
+    s = scenario
+    args = await preview(s, 'pending')
+    s.svc._update_db_order_status = AsyncMock(return_value=False)
+    s.session.scalar = AsyncMock(return_value='PLACED')
+    message = await s.svc.execute_signal_exit(**args)
+    assert [e for e in s.events if isinstance(e, tuple)] == [('cancel', 103)]
+    assert 'chưa cập nhật được database' in message and 'Đã dừng' in message
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('during_cancel', [False, True])
 async def test_pending_fill_is_closed_using_opening_order_provenance(scenario, during_cancel):
     s = scenario

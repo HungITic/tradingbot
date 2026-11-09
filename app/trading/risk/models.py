@@ -51,6 +51,9 @@ class RiskConfig(BaseModel):
     allowed_symbols: list[str] = Field(default_factory=lambda: ["XAUUSD", "XAUUSDm", "XAUUSD.s", "XAUUSDc", "XAUUSD.c"])
     signal_expire_seconds: int = 300
     duplicate_timeout_seconds: int = 10
+    entry_cooldown_seconds: int = 0
+    max_entries_per_window: int = 0
+    entry_window_seconds: int = 300
 
     # Position Management Rules (Tunable via Personal Bot)
     default_partial_close_percent: Decimal = Decimal("50.0")
@@ -103,6 +106,8 @@ class RiskConfig(BaseModel):
 
     @model_validator(mode="after")
     def check_limits(self):
+        if self.entry_cooldown_seconds < 0 or self.max_entries_per_window < 0 or self.entry_window_seconds < 1:
+            raise ValueError('Khoảng nghỉ/số kèo tối đa không được âm; cửa sổ đếm phải lớn hơn 0 giây')
         recovery_limits = (self.recovery_max_entry_gap, self.recovery_max_quote_distance,
                            self.recovery_max_sl_distance, self.recovery_max_tp_distance)
         if any(not value.is_finite() or value <= 0 for value in recovery_limits):

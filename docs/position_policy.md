@@ -24,6 +24,27 @@ Bản này thay thế các mô tả cũ về TP1, hòa vốn và chốt một ph
 
 ## TP và chốt một phần
 
+### Nhiều rule trong cùng tin nhắn
+
+- Mỗi rule giữ phạm vi và tỷ lệ riêng. Từ “xấu” trong câu “chốt bớt entry xấu”
+  không đổi phạm vi của rule độc lập như “kèo chạy”. Target được cài rõ trong
+  rule được giữ nguyên.
+- Các rule độc lập chạy theo thứ tự xuất hiện trong tin. Keyword dài/priority
+  vẫn được dùng để chọn rule khi các từ khóa trùng đoạn; các hành động tương
+  đương được gộp để không chốt hai lần.
+- Trước mỗi rule, đọc lại vị thế MT5 và dựng lại nhánh từ những phần còn mở
+  trong phạm vi đã chọn. Dùng khối lượng còn lại, kể cả khi TP1 đã đóng và TP2
+  trở thành phần đại diện mới của nhánh. Không thêm vị thế mới khớp giữa chừng.
+- Quyền chốt lặp xét lịch sử trước tin nhắn hiện tại. Một rule trong tin này
+  không làm các rule khác trong cùng tin bị coi là tin chốt lặp; quyền chốt lặp
+  cho những tin tiếp theo vẫn giữ theo cấu hình/rule.
+- Ví dụ Min Entry 2 lot, Max Entry 2 lot; “kèo chạy” chốt 70%, tiếp đó “chốt bớt
+  entry xấu” chốt 100%: đóng 1.4 lot ở mỗi nhánh, sau đó đóng nốt 0.6 lot Min
+  Entry. Kết quả Min Entry hết, Max Entry còn 0.6 lot (tùy bước lot của sàn).
+- Nếu kết quả gửi MT5 chưa rõ, dừng các rule còn lại để đối soát.
+
+### Chia TP trên broker
+
 - **Lệnh mới có TP1 và TP2, tài khoản hedging:** mỗi nhánh entry được chia theo `default_partial_close_percent` lúc mở. Ví dụ 1.5 lot và 30% → 0.45 lot gắn TP1, 1.05 lot gắn TP2, cùng SL. Cả nhánh market và nhánh pending đều dùng TP trực tiếp phía broker. Hai phần là hai vị thế MT5 nhưng được gom thành một nhánh trong phần vị thế và lịch sử Telegram.
 - Bot xác nhận `margin_mode=2` từ MT5. Tỷ lệ 0% hoặc tắt TP1 → chỉ mở phần TP2; 100% → chỉ mở phần TP1. Hai phần phải hợp lệ theo lot tối thiểu/bước lot của broker; không đủ lot thì từ chối mở nhánh, không âm thầm đổi tỷ lệ. Lot phần TP1 làm tròn xuống, phần TP2 giữ số dư để không tăng tổng lot.
 - Tỷ lệ được cố định trong khối lượng vị thế lúc mở. Đổi cấu hình không chia lại vị thế đang mở. Giới hạn số vị thế/lệnh chờ tính cả các phần TP: hai nhánh entry, mỗi nhánh hai TP tương ứng tối đa bốn lệnh MT5.

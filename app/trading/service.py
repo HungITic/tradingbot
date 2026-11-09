@@ -48,9 +48,11 @@ from app.trading.native_tp import NativeTPMixin, branch_comment, native_comment
 from app.trading.management_scope import ManagementScopeMixin
 from app.trading.slippage_limits import SlippageLimitMixin
 from app.trading.signal_actions import SignalActionsMixin
+from app.trading.signal_mute import SignalMuteMixin
+from app.trading.entry_throttle import EntryThrottleMixin, EntryThrottleStore
 
 
-class TradingService(SignalActionsMixin, SlippageLimitMixin, ManagementScopeMixin, NativeTPMixin, CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixin):
+class TradingService(EntryThrottleMixin, SignalMuteMixin, SignalActionsMixin, SlippageLimitMixin, ManagementScopeMixin, NativeTPMixin, CloseReportingMixin, PositionPolicyMixin, TradingSafetyMixin):
     """Core trade coordinator and order router."""
 
     def __init__(
@@ -92,6 +94,7 @@ class TradingService(SignalActionsMixin, SlippageLimitMixin, ManagementScopeMixi
                 self.risk_config = RiskConfig(enabled=False)
 
         self._execution_lock = asyncio.Lock()
+        self.entry_throttle_store = EntryThrottleStore()
         self._close_executions: dict = {}
         self._recent_signals: list[dict[str, Any]] = []
         self._notify_callback: Callable[..., Coroutine[Any, Any, None]] | None = None
@@ -107,6 +110,7 @@ class TradingService(SignalActionsMixin, SlippageLimitMixin, ManagementScopeMixi
         self._ticket_to_symbol: dict[int, str] = {}
         self._ticket_to_entry_comment: dict[int, str] = {}
         self._cancelled_dual_entry_tickets: set[int] = set()
+        self._muted_signal_ids: set[int] = set()
         self._position_opening_orders: dict[int, int] = {}
         self._position_entry_deals: dict[int, dict[int, DealInfo]] = {}
         self._pending_cancel_lock = asyncio.Lock()
@@ -359,6 +363,9 @@ class TradingService(SignalActionsMixin, SlippageLimitMixin, ManagementScopeMixi
                 await self.set_signal_status(entry.get("db_id"), "EXPIRED", problem)
                 return f"⛔ {escape(problem)}"
             context = await self.build_risk_context()
+            problem = await self.entry_throttle_problem(context.account)
+            if problem:
+                return f'⛔ Chặn vào lệnh liên tục: {escape(problem)}'
             reqs = entry["orders"]
             targets = list(reqs) if target == "both" else [target]
             selected = [reqs[t] for t in targets if t in reqs]
@@ -386,6 +393,9 @@ class TradingService(SignalActionsMixin, SlippageLimitMixin, ManagementScopeMixi
                     prepared.append(req)
                 except Exception as exc:
                     return f"⛔ Không thể kiểm tra giá: {escape(str(exc))}"
+            problem = await self.entry_throttle_problem(context.account, reserve=True, signal_id=entry.get('db_id'))
+            if problem:
+                return f'⛔ Chặn vào lệnh liên tục: {escape(problem)}'
             # Consume the approval before awaiting the broker, so repeated clicks cannot resubmit it.
             self._pending_overrides.pop(signal_db_id, None)
             messages = []
@@ -895,6 +905,12 @@ class TradingService(SignalActionsMixin, SlippageLimitMixin, ManagementScopeMixi
             action = signal.new_order.action
             symbol = signal.new_order.symbol
 
+            problem = await self.entry_throttle_problem(context.account)
+            if problem:
+                await self.set_signal_status(signal_db_id, 'REJECTED', problem)
+                await self.notify(self.format_notification(f'⛔ Chặn vào lệnh liên tục: {escape(problem)}', message_link))
+                return
+
             try:
                 tick = await self.checked_tick(symbol)
                 current_price = tick.bid if action == OrderAction.SELL else tick.ask
@@ -1085,6 +1101,11 @@ class TradingService(SignalActionsMixin, SlippageLimitMixin, ManagementScopeMixi
                 await self.notify(f"⛔ {escape(problem)}")
                 return
             if not self.risk_config.enabled:
+                return
+            problem = await self.entry_throttle_problem(context.account, reserve=True, signal_id=signal_db_id)
+            if problem:
+                await self.set_signal_status(signal_db_id, 'REJECTED', problem)
+                await self.notify(self.format_notification(f'⛔ Chặn vào lệnh liên tục: {escape(problem)}', message_link))
                 return
             result_1 = await self.open_entry_branch(order_req_1)
             await self.set_signal_status(signal_db_id, "EXECUTED" if result_1.success else
@@ -1738,6 +1759,11 @@ class TradingService(SignalActionsMixin, SlippageLimitMixin, ManagementScopeMixi
                     "lot_min_entry": str(config.lot_min_entry),
                     "lot_max_entry": str(config.lot_max_entry),
                     "max_slippage_entry": str(config.max_slippage_entry),
+                },
+                ("risk", "entry_throttle"): {
+                    "entry_cooldown_seconds": config.entry_cooldown_seconds,
+                    "max_entries_per_window": config.max_entries_per_window,
+                    "entry_window_seconds": config.entry_window_seconds,
                 },
                 ("risk", "position_management"): {
                     "default_partial_close_percent": str(config.default_partial_close_percent),

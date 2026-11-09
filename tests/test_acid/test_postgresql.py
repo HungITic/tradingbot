@@ -430,6 +430,93 @@ async def test_manual_signal_exit_resolves_position_order_ids_and_preserves_othe
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('cooldown,cap,winners', [(60, 0, 1), (0, 3, 3)])
+async def test_entry_admission_concurrent_writers_share_account_limit(pg, cooldown, cap, winners):
+    from app.models.signal import Signal
+    from app.models.entry_admission import EntryAdmission
+    from app.trading.entry_throttle import EntryThrottleStore
+    async with database.get_session() as session:
+        signals = [Signal(raw_message=f'signal {i}') for i in range(12)]
+        session.add_all(signals)
+        await session.flush()
+        ids = [s.id for s in signals]
+    config = RiskConfig(entry_cooldown_seconds=cooldown, max_entries_per_window=cap, entry_window_seconds=300)
+    results = await asyncio.gather(*(EntryThrottleStore().reserve('Demo:1', sid, config) for sid in ids))
+    assert results.count(None) == winners
+    async with database.get_session() as session:
+        assert await session.scalar(select(func.count()).select_from(EntryAdmission)) == winners
+    # New store = restart: the DB history still blocks. A different account has its own capacity.
+    assert await EntryThrottleStore().check('Demo:1', config)
+    assert await EntryThrottleStore().reserve('Demo:2', ids[0], config) is None
+
+
+@pytest.mark.asyncio
+async def test_entry_admission_same_signal_is_never_reserved_twice(pg):
+    from app.models.signal import Signal
+    from app.models.entry_admission import EntryAdmission
+    from app.trading.entry_throttle import EntryThrottleStore
+    async with database.get_session() as session:
+        source = Signal(raw_message='signal')
+        session.add(source)
+        await session.flush()
+        source_id = source.id
+    config = RiskConfig(max_entries_per_window=100)
+    store = EntryThrottleStore()
+    assert await store.check('Demo:1', config) is None
+    assert await store.reserve('Demo:1', source_id, config) is None
+    assert await store.reserve('Demo:1', source_id, config)
+    async with database.get_session() as session:
+        assert await session.scalar(select(func.count()).select_from(EntryAdmission)) == 1
+
+
+@pytest.mark.asyncio
+async def test_entry_admission_commit_failure_rolls_back_slot(pg, monkeypatch):
+    from app.models.signal import Signal
+    from app.models.entry_admission import EntryAdmission
+    from app.trading.entry_throttle import EntryThrottleStore
+    original = database.get_session
+    async with original() as session:
+        source = Signal(raw_message='signal')
+        session.add(source)
+        await session.flush()
+        source_id = source.id
+    @asynccontextmanager
+    async def failed_commit():
+        async with original() as session:
+            yield session
+            await session.flush()
+            raise RuntimeError('commit failed')
+    monkeypatch.setattr(database, 'get_session', failed_commit)
+    with pytest.raises(RuntimeError, match='commit failed'):
+        await EntryThrottleStore().reserve('Demo:1', source_id, RiskConfig(entry_cooldown_seconds=60))
+    async with original() as session:
+        assert await session.scalar(select(func.count()).select_from(EntryAdmission)) == 0
+
+
+@pytest.mark.asyncio
+async def test_entry_admission_migration_is_idempotent_after_startup_create_all(pg):
+    from importlib import import_module
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    from app.models.signal import Signal
+    from app.models.entry_admission import EntryAdmission
+    from app.trading.entry_throttle import EntryThrottleStore
+    async with database.get_session() as session:
+        source = Signal(raw_message='signal')
+        session.add(source)
+        await session.flush()
+        source_id = source.id
+    assert await EntryThrottleStore().reserve('Demo:1', source_id, RiskConfig(entry_cooldown_seconds=60)) is None
+    def upgrade(connection):
+        with Operations.context(MigrationContext.configure(connection)):
+            import_module('migrations.versions.f6a7b8c9d0e1_entry_admissions').upgrade()
+    async with pg.begin() as conn:
+        await conn.run_sync(upgrade)
+        await conn.run_sync(upgrade)
+        assert await conn.scalar(select(func.count()).select_from(EntryAdmission)) == 1
+
+
+@pytest.mark.asyncio
 async def test_schema_migration_preserves_existing_financial_rows(pg):
     from importlib import import_module
     from alembic.migration import MigrationContext

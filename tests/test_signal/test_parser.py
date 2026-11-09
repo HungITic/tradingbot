@@ -209,6 +209,34 @@ TP: 4158 - 4149"""
 
 
 class TestManagementRules:
+    def test_independent_rules_keep_scope_and_follow_message_order(self):
+        engine = ManagementRuleEngine()
+        engine.add_or_update_rule('kèo chạy', ManagementType.PARTIAL_CLOSE,
+            {'percentage': Decimal('70'), 'percentage_explicit': True})
+        parser = SignalParser(rule_engine=engine)
+        actions = parser.parse('kèo chạy +80pip nên chốt bớt entry xấu').management_actions
+        assert [(a.keyword, a.target, a.percentage) for a in actions] == [
+            ('kèo chạy', None, Decimal('70')), ('chốt bớt', 'MIN_ENTRY', None)]
+        reversed_actions = parser.parse('chốt bớt entry xấu; kèo chạy +80pip').management_actions
+        assert [a.target for a in reversed_actions] == ['MIN_ENTRY', None]
+
+    def test_explicit_rule_scope_is_preserved_in_bad_entry_message(self):
+        engine = ManagementRuleEngine()
+        engine.add_or_update_rule('kèo chạy', ManagementType.PARTIAL_CLOSE,
+            {'percentage': Decimal('70'), 'target': 'TP2'})
+        parsed = SignalParser(rule_engine=engine).parse('kèo chạy +80pip nên chốt bớt entry xấu')
+        assert next(a for a in parsed.management_actions if a.keyword == 'kèo chạy').target == 'TP2'
+
+    def test_equivalent_rule_merges_keep_earliest_execution_position(self):
+        engine = ManagementRuleEngine()
+        engine.add_or_update_rule('kèo chạy', ManagementType.PARTIAL_CLOSE, {'percentage': Decimal('70')})
+        engine.add_or_update_rule('về đích', ManagementType.PARTIAL_CLOSE,
+                                 {'percentage': Decimal('70'), 'allow_repeat': False})
+        actions = SignalParser(rule_engine=engine).parse('kèo chạy; chốt bớt entry xấu; về đích').management_actions
+        assert len(actions) == 2
+        assert actions[0].percentage == Decimal('70') and actions[0].target is None
+        assert actions[0].allow_repeat is False and actions[1].target == 'MIN_ENTRY'
+
     def test_parse_combo_management_message(self, parser):
         text = "#XAU Kèo chạy rồi ae +120pips chốt bớt dịch stoploss nha"
         signal = parser.parse(text)

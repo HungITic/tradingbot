@@ -38,6 +38,7 @@ def scoped(monkeypatch):
                             D('1'), D('0'), D('0'), 'BUY', datetime.now(timezone.utc))
     positions = [pos(11), pos(22)]
     svc.get_open_positions = AsyncMock(return_value=positions)
+    broker.get_positions.side_effect = lambda: list(svc.get_open_positions.return_value)
     svc.position_orders = AsyncMock(return_value={})
     svc.management_history = AsyncMock(return_value=(set(), set()))
     svc._insert_management_action = AsyncMock()

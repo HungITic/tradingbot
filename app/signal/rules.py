@@ -127,6 +127,7 @@ class ManagementRuleEngine:
         """
         lower_text = text.lower()
         actions: list[ParsedManagementAction] = []
+        action_offsets: dict[int, int] = {}
         matched_spans: list[tuple[int, int]] = []
 
         # Check for explicit percentage in text (e.g., 'chốt bớt 30%')
@@ -153,8 +154,11 @@ class ManagementRuleEngine:
                 pct = explicit_pct if explicit_pct is not None else rule.default_params.get("percentage")
                 target = rule.default_params.get("target")
                 if (rule.action_type == ManagementType.PARTIAL_CLOSE
+                        and target is None
+                        and (re.search(r"\bchốt\s+bớt\b", rule.keyword)
+                             or re.search(r"\bxấu\b", rule.keyword))
                         and re.search(r"\bchốt\s+bớt\b", lower_text)
-                        and re.search(r"\bxấu\b", lower_text) and target not in {'TP1', 'TP2'}):
+                        and re.search(r"\bxấu\b", lower_text)):
                     target = "MIN_ENTRY"
 
                 price = None
@@ -185,13 +189,18 @@ class ManagementRuleEngine:
                     allow_repeat=rule.default_params.get('allow_repeat'),
                 )
                 actions.append(action)
+                action_offsets[id(action)] = start
 
         unique = {}
         for action in actions:
             kind = "STOP" if action.action_type in {ManagementType.MOVE_SL, ManagementType.BREAKEVEN} else action.action_type.value
             key = (kind, action.price, action.side, action.percentage, action.target)
             previous = unique.get(key)
+            first_offset = min(action_offsets[id(action)], action_offsets[id(previous)]) if previous is not None else action_offsets[id(action)]
             # Equivalent triggers must not close twice; an explicit denial wins conflicts.
             if previous is None or (previous.allow_repeat is None and action.allow_repeat is not None) or action.allow_repeat is False:
                 unique[key] = action
-        return list(unique.values())
+            action_offsets[id(unique[key])] = first_offset
+        # Keyword length/priority resolves overlapping matches; independent rules
+        # execute in source order, each retaining its own scope and percentage.
+        return sorted(unique.values(), key=lambda action: action_offsets[id(action)])

@@ -22,6 +22,12 @@ class PartialVolumeTooSmall(ValueError):
     pass
 
 
+# Opposite NEW_ORDER on the same symbol closes the remaining bot volume in full.
+# The audit identifier stays OPPOSITE_SIGNAL_HALF so replay de-duplication of
+# historical events keeps working.
+OPPOSITE_SIGNAL_CLOSE_PERCENT = Decimal('100')
+
+
 class PositionPolicyMixin:
     def management_policy_description(self) -> str:
         cfg = self.risk_config
@@ -35,7 +41,7 @@ class PositionPolicyMixin:
                 "Không đủ lot để tách: từ chối mở nhánh. Chính sách thiếu lot TP1 chỉ dùng cho lệnh cũ.\n"
                 "Chỉ có một TP: đóng toàn bộ tại TP đó.\n"
                 "Trượt giá bất lợi quá ngưỡng: tự đặt limit tại entry. Có action liên quan thì hủy phần limit đó còn chờ.\n"
-                "Signal ngược chiều cùng symbol: chốt tiếp 50% lot còn lại của vị thế bot, không phụ thuộc cấu hình chốt lặp.\n"
+                "Signal ngược chiều cùng symbol: đóng 100% lot còn lại của vị thế bot (trừ kèo đã ngừng nhận action).\n"
                 f"Chốt lặp chung: {'bật' if cfg.allow_multiple_partial_closes else 'tắt'}. "
                 f"Từ khóa được chốt tiếp: {escape(', '.join(cfg.repeat_partial_close_keywords) or 'chưa có')}.\n"
                 "Rule có repeat=true/false được ưu tiên hơn cấu hình chốt lặp chung và danh sách ngoại lệ.\n"
@@ -208,13 +214,17 @@ class PositionPolicyMixin:
         return result, volume
 
     async def opposite_signal_positions(self, order):
-        """Only recorded bot positions of the exact symbol and opposite side qualify."""
+        """Only recorded bot positions of the exact symbol and opposite side qualify.
+
+        Setups muted from channel actions are excluded as well.
+        """
         opposite = 'SELL' if order.action.value == 'BUY' else 'BUY'
         candidates = [p for p in await self.broker.get_positions()
                       if p.symbol == order.symbol and p.position_type == opposite]
         orders = await self.position_orders(candidates)
         managed = [p for p in candidates if p.ticket in orders
-                   and isinstance(orders[p.ticket].signal_id, int) and orders[p.ticket].signal_id > 0]
+                   and isinstance(orders[p.ticket].signal_id, int) and orders[p.ticket].signal_id > 0
+                   and not self.is_signal_muted(orders[p.ticket].signal_id)]
         return await self.group_native_positions(managed)
 
     async def close_opposite_signal_half(self, order, signal_id, message_link=None):
@@ -225,31 +235,33 @@ class PositionPolicyMixin:
         if signal_id is None:
             raise ValueError('Thiếu nhật ký signal ngược chiều; chưa chốt vị thế')
         from app.models.risk import RiskEvent
-        # Commit the trigger before MT5; replay must never halve the same signal twice.
+        pct = OPPOSITE_SIGNAL_CLOSE_PERCENT
+        pct_text = f'{pct.normalize():f}'
+        # Commit the trigger before MT5; replay must never reduce the same signal twice.
         async with database.get_session() as session:
             session.add(RiskEvent(signal_id=signal_id, event_type='OPPOSITE_SIGNAL_HALF',
                 rule_name='opposite_signal_half', details={'symbol': order.symbol,
-                    'new_side': order.action.value, 'percentage': '50',
+                    'new_side': order.action.value, 'percentage': pct_text,
                     'positions': [{'ticket': p.ticket, 'volume': str(p.volume)} for p in positions]}))
         changed = False
         for pos in positions:
             try:
-                await self.partial_volume(pos, Decimal('50'))
+                await self.partial_volume(pos, pct)
             except PartialVolumeTooSmall as exc:
                 await self._insert_management_action(signal_id, pos.ticket, 'PARTIAL_CLOSE',
-                    {'reason': 'OPPOSITE_SIGNAL_HALF', 'percentage': '50', 'volume': '0'},
+                    {'reason': 'OPPOSITE_SIGNAL_HALF', 'percentage': pct_text, 'volume': '0'},
                     'SKIPPED', {'comment': str(exc)})
                 await self.notify(self.format_notification(
-                    f'ℹ️ Signal ngược chiều · {escape(pos.symbol)}: lot còn lại quá nhỏ để chốt 50%; giữ nguyên vị thế.', message_link))
+                    f'ℹ️ Signal ngược chiều · {escape(pos.symbol)}: lot còn lại quá nhỏ để chốt {pct_text}%; giữ nguyên vị thế.', message_link))
                 continue
-            result, volume = await self.partial_one(pos, Decimal('50'))
+            result, volume = await self.partial_one(pos, pct)
             if result.raw.get('uncertain'):
                 self.risk_config.enabled = False
-            await self.record_management(signal_id, pos, 'PARTIAL_CLOSE', result,
-                reason='OPPOSITE_SIGNAL_HALF', percentage='50', volume=str(volume))
+            await self.record_management(signal_id, pos, 'CLOSE' if pct == 100 else 'PARTIAL_CLOSE', result,
+                reason='OPPOSITE_SIGNAL_HALF', percentage=pct_text, volume=str(volume))
             await self.notify(self.format_notification(
                 f"{'✅' if result.success else '❌'} Signal {order.action.value} ngược chiều · "
-                f'{escape(pos.symbol)} {pos.position_type}: chốt 50% lot còn lại ({volume} lot). '
+                f'{escape(pos.symbol)} {pos.position_type}: chốt {pct_text}% lot còn lại ({volume} lot). '
                 f'{escape(result.comment)}', message_link))
             changed |= result.success or bool(result.volume)
             if (not result.success or result.retcode == 10010 or result.raw.get('uncertain')
@@ -439,6 +451,22 @@ class PositionPolicyMixin:
             raise ValueError("Có nhiều kèo có Min Entry phù hợp; hãy reply đúng kèo hoặc chỉ rõ 'tất cả'.")
         return selected
 
+    @staticmethod
+    def management_position_key(pos, orders):
+        """Keep a native branch stable when its representative TP child closes."""
+        key = native_key(orders.get(pos.ticket)) if pos.members else None
+        return ('branch', *key, pos.position_type) if key else ('ticket', pos.ticket)
+
+    async def fresh_management_positions(self, original_positions):
+        originals = {child.ticket: child for p in original_positions for child in (p.members or (p,))}
+        live = [p for p in await self.broker.get_positions() if p.ticket in originals
+                and p.symbol == originals[p.ticket].symbol
+                and p.position_type == originals[p.ticket].position_type
+                and (not p.comment or not originals[p.ticket].comment or p.comment == originals[p.ticket].comment)]
+        # Rebuild current branch volumes from the surviving, originally selected
+        # children; a newly filled pending entry cannot widen a management scope.
+        return await self.group_native_positions(live)
+
     async def unique_bad_entry_scope(self, signal, positions):
         """A message without symbol/reply can target one proven Min branch, never guess among setups."""
         orders = await self.position_orders(positions)
@@ -496,6 +524,21 @@ class PositionPolicyMixin:
             await self.set_signal_status(signal_id, "REJECTED", "Thiếu symbol hoặc reply xác định kèo")
             await self.notify("⛔ Cần symbol, reply đúng kèo hoặc chỉ rõ 'tất cả'.")
             return
+        try:
+            positions, pending, muted = await self.exclude_muted_targets(positions, pending)
+        except Exception as exc:
+            reason = f'Không kiểm tra được kèo đang ngừng nhận action: {exc}'
+            await self.set_signal_status(signal_id, "REJECTED", reason)
+            await self.notify(f"⛔ {escape(reason)}; chưa thay đổi vị thế.")
+            return
+        if muted:
+            labels = ', '.join(f'#{sid}' for sid in sorted(muted))
+            if not positions and not pending:
+                reason = f'Kèo {labels} đang ngừng nhận action'
+                await self.set_signal_status(signal_id, "SKIPPED", reason)
+                await self.notify(self.format_notification(f"🔕 {reply_tag}: {escape(reason)}; bỏ qua tin này.", link))
+                return
+            await self.notify(f"🔕 Bỏ qua kèo {labels} (đang ngừng nhận action); chỉ áp dụng cho phần còn lại.")
         if not positions and not pending:
             if pre_cancelled_limits:
                 await self.set_signal_status(signal_id, 'EXECUTED', 'Đã hủy limit chưa khớp do action cập nhật')
@@ -505,7 +548,8 @@ class PositionPolicyMixin:
             return
         tp_scoped = any(a.target in {'TP1', 'TP2'} for a in signal.management_actions)
         audit_positions = [child for p in positions for child in (p.members or (p,))] if tp_scoped else positions
-        orders = await self.position_orders(audit_positions)
+        children = [child for p in positions for child in (p.members or (p,))]
+        orders = await self.position_orders(children)
         groups = await self.position_groups(positions, orders)
         # A reply itself is an authoritative group for positions with no DB link.
         if reply_id is not None:
@@ -518,15 +562,25 @@ class PositionPolicyMixin:
             await self.notify(f"⛔ {escape(str(exc))}")
             return
         partial_history, _ = await self.management_history(audit_positions)
+        # Repeat permission refers to reductions before this message. Distinct
+        # rules within this one message may act on the same remaining branch.
+        reduced_before_message = {self.management_position_key(p, orders):
+            self.position_was_reduced(p, orders.get(p.ticket), partial_history)
+            for p in positions + children}
         outcomes = []
         closed_tickets = set()
         has_stop = any(a.action_type in {ManagementType.MOVE_SL, ManagementType.BREAKEVEN} for a in signal.management_actions)
         for action, selected in zip(signal.management_actions, selections):
+            original_selection = selected
+            fresh = await self.fresh_management_positions(positions)
             if action.target in {'TP1', 'TP2'}:
-                # Prior actions or broker TP fills may have changed these children.
-                live = {p.ticket: p for p in await self.broker.get_positions()}
-                selected = [live[p.ticket] for p in selected if p.ticket in live
-                            and (not live[p.ticket].comment or live[p.ticket].comment == orders[p.ticket].comment)]
+                allowed = {p.ticket for p in original_selection}
+                selected = [child for p in fresh for child in (p.members or (p,))]
+                selected = [p for p in selected if p.ticket in allowed
+                            and (not p.comment or p.comment == orders[p.ticket].comment)]
+            else:
+                allowed = {self.management_position_key(p, orders) for p in original_selection}
+                selected = [p for p in fresh if self.management_position_key(p, orders) in allowed]
             if action.action_type == ManagementType.CLOSE and action.target not in {'TP1', 'TP2'}:
                 for order in pending:
                     if action.side is None or order.order_type.startswith(action.side.value):
@@ -542,8 +596,7 @@ class PositionPolicyMixin:
                     if partial and percentage == 0:
                         await self.notify(f"ℹ️ {reply_tag} · Bỏ qua chốt vì tỷ lệ là 0%.")
                         continue
-                    db_order = orders.get(pos.ticket)
-                    already = self.position_was_reduced(pos, db_order, partial_history)
+                    already = reduced_before_message.get(self.management_position_key(pos, orders), True)
                     if partial and percentage < 100 and already and not self.repeat_partial_allowed(signal.raw_message, action):
                         await self.notify(f"ℹ️ {reply_tag} · Bỏ qua chốt bớt #{pos.ticket}: Vị thế đã chốt 1 phần trước đó; loại signal này chưa được phép chốt tiếp.")
                         continue
@@ -565,6 +618,12 @@ class PositionPolicyMixin:
                     elif action.target in {'TP1', 'TP2'}:
                         label += f' phần {action.target}'
                     await self.notify(self.format_notification(f"{'✅' if result.success else '❌'} Position Management: {label}\n{reply_tag} · #{pos.ticket} · {escape(result.comment)}", link))
+                    if result.raw.get('uncertain'):
+                        self.risk_config.enabled = False
+                        changed = any(outcomes) or any(r.success for _, r, _ in result.raw.get('member_results', []))
+                        await self.set_signal_status(signal_id, 'PARTIAL' if changed else 'ERROR')
+                        await self.notify('⛔ Kết quả MT5 chưa xác định; đã dừng các rule còn lại để đối soát.')
+                        return
                     if result.success and partial:
                         self._tp1_processed_tickets.add(pos.ticket)
                         partial_history.add(pos.ticket)

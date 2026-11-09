@@ -107,6 +107,20 @@ async def test_only_opposite_managed_exact_symbol_is_halved(opposite, new_side, 
 
 
 @pytest.mark.asyncio
+async def test_muted_setup_is_not_halved_by_opposite_signal(opposite):
+    svc, live, rows, events, _, _ = opposite
+    live.extend([position(1), position(2)])
+    rows.extend([opening(live[0], 10), opening(live[1], 11)])
+    svc._muted_signal_ids = {10}
+    assert [p.ticket for p in await svc.opposite_signal_positions(entry())] == [2]
+    assert await svc.close_opposite_signal_half(entry(), 20)
+    svc.broker.close_position.assert_awaited_once_with(2, D('.75'))
+    svc._muted_signal_ids = {10, 11}
+    svc.broker.close_position.reset_mock()
+    assert await svc.close_opposite_signal_half(entry(), 21) is None
+    svc.broker.close_position.assert_not_awaited()
+
+@pytest.mark.asyncio
 async def test_repeat_halves_remaining_even_when_repeat_and_percent_settings_differ(opposite):
     svc, live, rows, _, _, _ = opposite
     svc.risk_config.allow_multiple_partial_closes = False

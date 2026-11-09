@@ -162,11 +162,16 @@ class TelegramConsoleMixin:
                 if link:
                     cards.append(f'<a href="{escape(link, quote=True)}">Xem signal gốc</a>')
                 signal_id = group.get('signal_id')
+                if signal_id and group.get('actions_muted'):
+                    cards.append('🔕 Đang ngừng nhận action từ kênh cho kèo này')
                 if signal_id:
                     row = [Button(f'Đóng kèo #{signal_id}', callback_data=f'sigexit_all_{signal_id}')]
                     if orders:
                         row.append(Button(f'Hủy chờ #{signal_id}', callback_data=f'sigexit_pending_{signal_id}'))
                     signal_buttons.append(row)
+                    signal_buttons.append([Button(f'🔔 Nhận lại action #{signal_id}', callback_data=f'sigmute_0_{signal_id}_{page}')
+                                           if group.get('actions_muted') else
+                                           Button(f'🔕 Ngừng nhận action #{signal_id}', callback_data=f'sigmute_1_{signal_id}_{page}')])
                 previous_group = index
             cards.append(pending_card(item) if is_pending else position_card(item, currency))
         if not entries:
@@ -294,6 +299,22 @@ class TelegramConsoleMixin:
                                               reply_markup=self.draft_keyboard(token))
             except (ValueError, RuntimeError) as exc:
                 await query.edit_message_text(f'⛔ Không xem trước được kèo: {escape(str(exc))}', parse_mode=ParseMode.HTML)
+            return True
+        if data.startswith('sigmute_'):
+            try:
+                _, flag, signal_id, page = data.split('_')
+                muted = flag == '1'
+                await self.service.set_signal_actions_muted(int(signal_id), muted, updated_by='TELEGRAM')
+            except (ValueError, RuntimeError) as exc:
+                await query.edit_message_text(f'⛔ Không cập nhật được kèo: {escape(str(exc))}', parse_mode=ParseMode.HTML)
+                return True
+            except Exception:
+                await query.edit_message_text('⛔ Không lưu được trạng thái vào database; giữ nguyên cài đặt cũ.')
+                return True
+            text, keyboard = await self.setups_view(int(page))
+            state = '🔕 Đã ngừng nhận action từ kênh' if muted else '🔔 Đã nhận lại action từ kênh'
+            await query.edit_message_text(f'{state} · Kèo #{signal_id}\n\n{text}', parse_mode=ParseMode.HTML,
+                                          reply_markup=keyboard)
             return True
         if data.startswith("be_"):
             ticket = int(data.split("_")[1])

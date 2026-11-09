@@ -30,3 +30,26 @@ không thể rollback các yêu cầu đã được sàn thực hiện nếu yê
 
 Chức năng giảm/đóng vị thế vẫn dùng được khi bot đang tạm dừng mở lệnh mới.
 Không cần migration database mới.
+
+Khi hủy lệnh chờ, journal MT5 đã đánh dấu Order là `CANCELLED` trong cùng
+transaction với xác nhận của sàn. Bước cập nhật database sau đó là idempotent:
+không coi trạng thái đã `CANCELLED` là lỗi, nên các lệnh chờ còn lại (TP1/TP2,
+Min/Max Entry) vẫn được hủy tiếp thay vì dừng sau lệnh đầu tiên.
+
+## Ngừng nhận action theo kèo
+
+Mỗi kèo đã liên kết signal trong **Kèo đang chạy** có nút
+**🔕 Ngừng nhận action #id** / **🔔 Nhận lại action #id**. Khi đã ngừng:
+
+- Tin quản lý lệnh từ kênh (đóng, chốt bớt, dời SL, hòa vốn, hủy chờ) không tác
+  động lên vị thế/lệnh chờ của kèo này, kể cả khi reply trực tiếp, theo symbol,
+  theo "signal gần nhất" hay "tất cả". Nếu tin chỉ nhắm vào kèo đã ngừng, signal
+  được ghi `SKIPPED`; nếu tin áp dụng cho nhiều kèo, các kèo khác vẫn được xử lý.
+- Limit do trượt giá của kèo không bị hủy bởi action cập nhật.
+- Signal mở lệnh ngược chiều không chốt 50% vị thế của kèo này (bản xem trước
+  khi duyệt thủ công cũng không liệt kê kèo này).
+- Vẫn giữ: SL/TP trên broker, TP1/TP2 tự động, tự hủy Max Entry khi Min Entry
+  đã chốt, và mọi thao tác thủ công qua bot (Đóng kèo, Hủy chờ, từng ticket).
+
+Trạng thái lưu thành `RiskEvent` (`SIGNAL_ACTIONS_MUTED`/`SIGNAL_ACTIONS_UNMUTED`,
+sự kiện mới nhất có hiệu lực) và được nạp khi khởi động; không cần migration.

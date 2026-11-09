@@ -185,6 +185,102 @@ async def test_bad_entry_full_exit_closes_both_children(native):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('bad_percentage,min_remaining', [('100', '0'), ('30', '.42')])
+@pytest.mark.parametrize('auto_be', [False, True])
+async def test_general_then_bad_entry_rule_uses_remaining_volume_and_exact_signal(native, bad_percentage, min_remaining, auto_be):
+    svc, rows, live = native
+    rows += [order(1, '.6'), order(2, '1.4', 'tp2'),
+             order(3, '.6', branch='bot-max-entry'), order(4, '1.4', 'tp2', branch='bot-max-entry'),
+             order(5, '1', signal_id=99)]
+    live += [position(1, '.6'), position(2, '1.4', 'tp2'),
+             replace(position(3, '.6'), comment='bot-max-entry:tp1'),
+             replace(position(4, '1.4', 'tp2'), comment='bot-max-entry:tp2'), position(5, '1')]
+    # The real bridge returns snapshots; mutating the broker must not mutate an
+    # earlier action's local view of the branch.
+    svc.broker.get_positions.side_effect = lambda: [replace(p) for p in live]
+    svc.risk_config.auto_breakeven_on_partial = auto_be
+    svc.risk_config.bad_entry_partial_close_percent = D(bad_percentage)
+    svc.parser.rule_engine.add_or_update_rule('kèo chạy', ManagementType.PARTIAL_CLOSE,
+        {'percentage': D('70'), 'percentage_explicit': True, 'allow_repeat': False})
+    scope = {'tickets': [1, 2, 3, 4], 'message_id': 1840, 'chat_id': -1003725831625}
+    svc.resolve_management_scope = AsyncMock(return_value=scope)
+    svc.audit_management_scope = AsyncMock()
+    parsed = svc.parser.parse('kèo chạy +80pip nên chốt bớt entry xấu')
+    await svc.process_management_signal(parsed, 30, None, None, chat_id=scope['chat_id'], message_id=1841)
+    assert sum((p.volume for p in live if p.ticket in {1, 2}), D('0')) == D(min_remaining)
+    assert sum(p.volume for p in live if p.ticket in {3, 4}) == D('.6')
+    assert next(p.volume for p in live if p.ticket == 5) == D('1')
+    assert [c.args for c in svc.broker.close_position.await_args_list] == [
+        (1, D('.6')), (2, D('.8')), (3, D('.6')), (4, D('.8')),
+        (2, D('.6') if bad_percentage == '100' else D('.18'))]
+    notices = [call.args[0] for call in svc.notify.await_args_list if 'Position Management' in call.args[0]]
+    assert len(notices) == 3 and all('✅' in text for text in notices)
+    assert all('Min Entry' not in text for text in notices[:2])
+    assert f'Chốt {bad_percentage}%' in notices[2] and 'Min Entry' in notices[2]
+    svc.set_signal_status.assert_awaited_once_with(30, 'EXECUTED')
+    assert all(c.args[0] in {2, 4} for c in svc.broker.modify_position.await_args_list)
+    if bad_percentage == '30':
+        # Repeat=false still blocks reductions from a later message; it does not
+        # suppress another separately configured rule within the first message.
+        svc.broker.close_position.reset_mock()
+        await svc.process_management_signal(parsed, 31, None, None, chat_id=scope['chat_id'], message_id=1842)
+        svc.broker.close_position.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_uncertain_overlap_execution_stops_all_subsequent_rules(native):
+    svc, rows, live = native
+    rows += [order(1, '.6'), order(2, '1.4', 'tp2')]
+    live += [position(1, '.6'), position(2, '1.4', 'tp2')]
+    svc.risk_config.bad_entry_partial_close_percent = D('100')
+    svc.parser.rule_engine.add_or_update_rule('kèo chạy', ManagementType.PARTIAL_CLOSE,
+        {'percentage': D('70'), 'percentage_explicit': True})
+    svc.broker.close_position.side_effect = None
+    svc.broker.close_position.return_value = OrderResult(False, raw={'uncertain': True})
+    await svc.process_management_signal(svc.parser.parse('XAUUSD kèo chạy chốt bớt entry xấu'), 30, None, None)
+    assert svc.broker.close_position.await_count == 1 and not svc.risk_config.enabled
+    assert any('đã dừng các rule còn lại' in c.args[0] for c in svc.notify.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_overlap_preview_labels_each_rules_scope_without_executing(native):
+    svc, rows, live = native
+    rows += [order(1, '.6'), order(2, '1.4', 'tp2'),
+             order(3, '2', branch='bot-max-entry')]
+    live += [position(1, '.6'), position(2, '1.4', 'tp2'),
+             replace(position(3, '2'), comment='bot-max-entry:tp1')]
+    svc.risk_config.bad_entry_partial_close_percent = D('100')
+    svc.parser.rule_engine.add_or_update_rule('kèo chạy', ManagementType.PARTIAL_CLOSE,
+        {'percentage': D('70'), 'percentage_explicit': True})
+    preview = await svc.preview_signal('XAUUSD kèo chạy +80pip nên chốt bớt entry xấu')
+    assert preview['can_execute']
+    assert 'Rule “kèo chạy” → các entry trong phạm vi signal đã chọn.' in preview['text']
+    assert 'Rule “chốt bớt” → Min Entry (entry xấu).' in preview['text']
+    assert 'Tỷ lệ chốt thực thi: 70%' in preview['text'] and 'Tỷ lệ chốt thực thi: 100%' in preview['text']
+    svc.broker.close_position.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_full_bad_entry_rule_before_general_does_not_reopen_or_reclose_min(native):
+    svc, rows, live = native
+    rows += [order(1, '.6'), order(2, '1.4', 'tp2'),
+             order(3, '.6', branch='bot-max-entry'), order(4, '1.4', 'tp2', branch='bot-max-entry')]
+    live += [position(1, '.6'), position(2, '1.4', 'tp2'),
+             replace(position(3, '.6'), comment='bot-max-entry:tp1'),
+             replace(position(4, '1.4', 'tp2'), comment='bot-max-entry:tp2')]
+    svc.broker.get_positions.side_effect = lambda: [replace(p) for p in live]
+    svc.risk_config.auto_breakeven_on_partial = False
+    svc.risk_config.bad_entry_partial_close_percent = D('100')
+    svc.parser.rule_engine.add_or_update_rule('kèo chạy', ManagementType.PARTIAL_CLOSE,
+        {'percentage': D('70'), 'percentage_explicit': True})
+    await svc.process_management_signal(svc.parser.parse('XAUUSD chốt bớt entry xấu; kèo chạy +80pip'), 30, None, None)
+    assert [(p.ticket, p.volume) for p in live] == [(4, D('.6'))]
+    assert [c.args for c in svc.broker.close_position.await_args_list] == [
+        (1, D('.6')), (2, D('1.4')), (3, D('.6')), (4, D('.8'))]
+    svc.set_signal_status.assert_awaited_once_with(30, 'EXECUTED')
+
+
+@pytest.mark.asyncio
 async def test_restart_detects_prior_partial_across_closed_child(native):
     svc, rows, live = native
     live += [position(2, '.07', 'tp2')]

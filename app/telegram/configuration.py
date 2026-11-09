@@ -8,6 +8,9 @@ CONFIG_FIELDS = {
     "min_lot": "Lot tối thiểu mỗi lệnh", "max_lot": "Lot tối đa mỗi lệnh",
     "allowed_symbols": "Mã được phép giao dịch",
     "duplicate_timeout_seconds": "Thời gian lọc trùng (giây)",
+    "entry_cooldown_seconds": "Khoảng nghỉ giữa hai kèo (giây; 0 = tắt)",
+    "max_entries_per_window": "Số kèo tối đa trong cửa sổ (0 = tắt)",
+    "entry_window_seconds": "Cửa sổ đếm kèo (giây)",
     "broker_utc_offset_hours": "Múi giờ sàn (UTC)",
     "default_lot": "Lot mặc định", "default_partial_close_percent": "Tỷ lệ chốt một phần (%)",
     "bad_entry_partial_close_percent": "Tỷ lệ chốt bớt entry xấu (%)",
@@ -30,6 +33,7 @@ CONFIG_FIELDS = {
 }
 CONFIG_SECTIONS = {
     "entry": ("🎯 Vào lệnh", {"enabled", "enable_dual_entry", "max_slippage_entry", "lot_min_entry", "lot_max_entry", "default_lot", "min_lot", "max_lot"}),
+    "frequency": ("⏱ Chặn vào liên tục", {"entry_cooldown_seconds", "max_entries_per_window", "entry_window_seconds"}),
     "sl": ("🛡 SL và hòa vốn", {"breakeven_offset_price", "breakeven_only_improve", "auto_breakeven_on_partial"}),
     "profit": ("✂️ Chốt lời và nhánh lệnh", {"default_partial_close_percent", "bad_entry_partial_close_percent", "tp1_enabled", "tp1_min_volume_action", "auto_cancel_pending_on_full_close", "allow_multiple_partial_closes", "repeat_partial_close_keywords"}),
     "risk": ("⚖️ Giới hạn tài khoản", {"require_sl", "require_tp", "allowed_symbols", "max_open_positions", "max_daily_loss_percent"}),
@@ -39,6 +43,9 @@ CONFIG_SECTIONS = {
 
 
 CONFIG_HELP = {
+    "entry_cooldown_seconds": "Khoảng nghỉ tối thiểu giữa hai lượt mở kèo trên tài khoản, áp dụng mọi mã, BUY/SELL, vòng mới, replay và lệnh được duyệt bằng nút. Một signal chia nhiều entry/TP tính một lượt. Nhập số giây >= 0; 0 tắt riêng chặn này. Lịch sử lưu database qua restart; chốt/hủy/dời SL vẫn được xử lý.",
+    "max_entries_per_window": "Số lượt mở kèo tối đa trong cửa sổ trượt entry_window_seconds. Nhập số nguyên >= 0; 0 tắt riêng chặn này. Kèo đã cấp lượt nhưng sau đó bị sàn từ chối, hủy pending hoặc đóng sớm vẫn được tính. Chạm ngưỡng thì từ chối mở mới, không có nút vượt chặn.",
+    "entry_window_seconds": "Độ dài cửa sổ trượt, số giây > 0. Ví dụ số kèo tối đa=3, cửa sổ=300: nhiều nhất 3 lượt trong bất kỳ 5 phút gần nhất. Khoảng nghỉ và giới hạn số kèo được kiểm tra đồng thời; không giữ tin bị chặn để tự vào muộn.",
     "signal_recovery_enabled": "Chỉ xử lý entry lỗi của signal XAUUSD trước khi gửi MT5: giữ một entry gốc gần giá hiện tại, bỏ entry còn lại; dùng lot Min Entry nếu đang bật hai entry. SL/TP lỗi: chỉ thông báo và dừng để bạn gửi lại mức đúng; không tự sửa hoặc đề xuất giá. Không tự thử lại lỗi gửi MT5.",
     "recovery_max_entry_gap": "Ngưỡng theo đơn vị giá XAU, mặc định 20. Signal đã lỗi và hai entry cách nhau hơn ngưỡng này: xét bỏ entry xa giá hiện tại. Không đổi signal đang hợp lệ.",
     "recovery_max_quote_distance": "Entry được giữ phải cách giá hiện tại không quá ngưỡng này; mặc định 30 giá XAU. Dùng báo giá mới lúc xử lý; replay ghim phương án đã xem trước.",
@@ -61,6 +68,7 @@ CONFIG_HELP = {
 }
 
 CONFIG_GROUP_HELP = {
+    "frequency": "Áp dụng cả signal khác nhau, BUY/SELL và vòng mới. Min/Max Entry, TP1/TP2 của cùng signal tính một lượt. Chốt/hủy/dời SL không bị giới hạn.\n\nMặc định hai chặn đều tắt (0). Ví dụ bật nghỉ 60 giây và tối đa 3 kèo/5 phút:\n<code>/config set entry_cooldown_seconds=60 max_entries_per_window=3 entry_window_seconds=300</code>",
     "entry": "Lot tối thiểu/tối đa là giới hạn mỗi lệnh. Min Entry/Max Entry là hai đầu giá của vùng entry.\n\nNếu cần đổi nhiều lot cùng lúc, gửi ví dụ:\n<code>/config set min_lot=0.02 max_lot=0.10 default_lot=0.02 lot_min_entry=0.02 lot_max_entry=0.02</code>",
     "sl": "Hòa vốn dùng entry riêng từng lệnh. Bù giá BUY cộng, SELL trừ.",
     "profit": "Một TP: đóng toàn bộ.\nLệnh mới có TP1 + TP2: chia lot theo tỷ lệ, gắn TP trực tiếp trên MT5. Đổi tỷ lệ áp dụng cho lần mở sau; không đủ lot để chia sẽ từ chối mở.\nMuốn chọn câu được chốt tiếp: dùng /rule add với repeat=true/false, không cần cấu hình hai chỗ.",

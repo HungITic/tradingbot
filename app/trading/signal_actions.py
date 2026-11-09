@@ -14,6 +14,17 @@ from app.telegram.utils import construct_telegram_message_link
 
 
 class SignalActionsMixin:
+    async def _ensure_db_order_cancelled(self, mt5_ticket):
+        """Idempotent: True when the stored order is CANCELLED after this call."""
+        if await self._update_db_order_status(mt5_ticket, 'CANCELLED'):
+            return True
+        try:
+            async with database.get_session() as session:
+                status = await session.scalar(select(Order.status).where(Order.mt5_ticket == mt5_ticket))
+        except Exception:
+            return False
+        return status == 'CANCELLED'
+
     async def linked_signal_state(self, *, opening_ids=None, since=None):
         positions = await self.broker.get_positions()
         pending = await self.broker.get_pending_orders()
@@ -82,7 +93,8 @@ class SignalActionsMixin:
                 group_key = ('signal', signal_id) if signal_id else ('unlinked', item.ticket)
                 group = groups.setdefault(group_key, {
                     'signal_id': signal_id, 'name': f'Kèo #{signal_id}' if signal_id else f'Chưa liên kết · #{item.ticket}',
-                    'positions': [], 'orders': [], 'message_link': state['links'].get(signal_id)})
+                    'positions': [], 'orders': [], 'message_link': state['links'].get(signal_id),
+                    'actions_muted': self.is_signal_muted(signal_id)})
                 group[key].append(item)
         return list(groups.values())
 
@@ -189,8 +201,12 @@ class SignalActionsMixin:
                     {'comment': result.comment, 'retcode': result.retcode, 'uncertain': bool(result.raw.get('uncertain'))})
                 if result.success and not result.raw.get('uncertain'):
                     cancelled += 1
-                    if not await self._update_db_order_status(item.ticket, 'CANCELLED'):
+                    # The broker journal already marks the row CANCELLED in the
+                    # same transaction as the MT5 acknowledgement, so a zero-row
+                    # update is the normal path, not a failure.
+                    if not await self._ensure_db_order_cancelled(item.ticket):
                         stopped = True
+                        failures.append(f'#{item.ticket}: Đã hủy trên MT5 nhưng chưa cập nhật được database')
                 else:
                     # A definitive "already filled" rejection may have raced the
                     # preview. Never retry cancel; the refreshed position is closed below.

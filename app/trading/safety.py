@@ -201,6 +201,8 @@ class TradingSafetyMixin:
                 decision = self.risk_engine.evaluate(signal, context)
                 if not decision.approved:
                     problem = decision.rejection_reason
+                if not problem:
+                    problem = await self.entry_throttle_problem(context.account)
             if not problem:
                 try:
                     tick = await self.checked_tick(order.symbol)
@@ -305,7 +307,13 @@ class TradingSafetyMixin:
             lines.extend(["", DIVIDER, "", self.management_policy_description(), ""])
             for action in signal.management_actions:
                 if action.action_type.value == "PARTIAL_CLOSE":
+                    target = ('Min Entry (entry xấu)' if action.target == 'MIN_ENTRY' else
+                              f'phần {action.target}' if action.target in {'TP1', 'TP2'} else
+                              'các entry trong phạm vi signal đã chọn')
+                    lines.append(f'Rule “{escape(action.keyword)}” → {target}.')
                     lines.append(f"Tỷ lệ chốt thực thi: {self.partial_percentage(action)}%")
+                    if sum(a.action_type.value == 'PARTIAL_CLOSE' for a in signal.management_actions) > 1:
+                        lines.append('Tính trên khối lượng còn lại khi đến rule này, sau các rule đứng trước trong tin.')
                     if self.partial_percentage(action) not in {0, 100}:
                         lines.append('Nếu vị thế đã chốt một phần: ' + ('được phép chốt tiếp theo cấu hình/từ khóa.'
                                      if self.repeat_partial_allowed(signal.raw_message, action) else 'bỏ qua vì tin này chưa được phép chốt tiếp.'))

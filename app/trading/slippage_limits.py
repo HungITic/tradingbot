@@ -61,6 +61,8 @@ class SlippageLimitMixin:
                                              message_path=None, expected_scope=None, is_reentry=False):
         targets = await self.slippage_invalidation_targets(signal, chat_id, message_id, reply_id,
                                                           message_path, expected_scope, is_reentry)
+        # A setup muted from channel actions keeps its waiting limits.
+        targets = [t for t in targets if not self.is_signal_muted(t)]
         if not targets:
             return []
         async with database.get_session() as session:
@@ -73,6 +75,8 @@ class SlippageLimitMixin:
                                          message_path=None, expected_scope=None, is_reentry=False):
         targets = await self.slippage_invalidation_targets(signal, chat_id, message_id, reply_id,
                                                           message_path, expected_scope, is_reentry)
+        # A setup muted from channel actions keeps its waiting limits.
+        targets = [t for t in targets if not self.is_signal_muted(t)]
         if not targets:
             return []
         async with database.get_session() as session:

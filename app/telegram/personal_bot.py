@@ -237,7 +237,7 @@ class PersonalTelegramBot(TelegramConsoleMixin):
             "<b>📊 Giao dịch &amp; Vị thế:</b>\n"
             "/status — Tổng quan hệ thống\n"
             "/inbox — Hộp thư tín hiệu và lý do xử lý\n"
-            "/setups — Các kèo đang chạy; đóng vị thế / hủy chờ theo signal\n"
+            "/setups — Các kèo đang chạy; đóng vị thế / hủy chờ / ngừng nhận action theo signal\n"
             "/positions — Vị thế đang mở\n"
             "/history [ngày] — Lịch sử lệnh đã đóng\n"
             "/stats [ngày] — Thống kê Win/Loss\n"

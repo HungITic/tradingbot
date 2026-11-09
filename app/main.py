@@ -66,7 +66,9 @@ class Application:
             # 1.2 Load Risk Config and Management Rules from DB
             await trading_service.load_risk_config_from_db()
             rule_count = await trading_service.load_management_rules_from_db()
-            logger.info("db_config_and_rules_loaded", rule_count=rule_count)
+            # Strict: a muted setup must never receive channel actions after restart.
+            muted = await trading_service.load_signal_mutes_from_db()
+            logger.info("db_config_and_rules_loaded", rule_count=rule_count, muted_signals=len(muted))
 
             # 2. MT5 Broker Connection
             logger.info("connecting_mt5_broker")
